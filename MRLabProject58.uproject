@@ -108,6 +108,11 @@
 		{
 			"Name": "LiveCodingToolset",
 			"Enabled": true
+		},
+		{
+			"Name": "MoversePlugin",
+			"Enabled": true,
+			"Optional": true
 		}
 	]
 }

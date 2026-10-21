@@ -16,3 +16,4 @@ The editor must be open for channels A and B.
 - Save assets after modifying them; put throwaway test content in `/Game/_Sandbox`.
 - Never put API keys or tokens in tracked files.
 - Editing `.uproject` while the editor runs takes effect only after an editor restart, and toggling plugins in the editor UI rewrites that file.
+- `MoversePlugin` is marked optional in the `.uproject`: it is installed only on the lab PC. Never save `/Game/Tracking/LiveLinkMoverseMRLab` on a machine without it, or the Moverse source inside the preset is lost.
