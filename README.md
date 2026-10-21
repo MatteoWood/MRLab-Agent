@@ -38,8 +38,9 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 - One step at a time. Before starting a step, a precise plan for that step is written and agreed with the owner.
 - Items in section 6 are not decided. Do not decide them; ask the owner.
 - Development happens on the owner's laptop now. The project moves to the lab rendering PC later. This repo is the bridge between the two machines.
-- Version control is this GitHub repo (private, Git LFS for binaries). GitLab was too small for the project. The knowledge base stays in its own GitLab repo.
+- Version control is this GitHub repo (public, Git LFS for binaries). GitLab was too small for the project. The knowledge base stays in its own GitLab repo.
 - AI tooling is Claude Code. Codex is no longer used.
+- The repo is public. Never write IP addresses, ports, hostnames or credentials of lab machines in tracked files (README, config, scripts, commit messages). Keep them in each machine's local `CLAUDE.md`.
 - `CLAUDE.md` (agent instructions) is machine-specific and ignored by Git. The laptop version includes committing and pushing to GitHub. The lab PC has no push credentials for GitHub, so its version has no GitHub steps. Both files exist only locally on their machine (laptop: `C:\Users\bosco\Documents\Unreal Projects\MRLabProject 5.8\CLAUDE.md`; lab PC: `CLAUDE.md` in its clone, created on 2026-10-21 from the former `CLAUDE.lab.md`, commit `8ea546d`).
 
 ## 3. Environment
@@ -51,9 +52,9 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 | LED wall | Curved. Driven by nDisplay. Stereo 3D through polarization. | Owner |
 | LED wall mesh in this project | `/Game/Assets/LEDWall`: 494 cm wide, 300 cm high, 30 cm curve depth (mesh bounds). Imported from `C:\Users\bosco\Desktop\MRLab model\LEDWall.fbx`. Not checked against the physical wall. | Asset |
 | Moverse tracking | Markerless. 8 Luxonis OAK-D Pro W PoE cameras in a circle at the ceiling, covering the LED wall area. Tracking zone 5 m x 8 m, up to 4 users, 50 or 60 Hz. Tracking PC (server room) runs the Moverse capture software and sends data to the rendering PC. Calibrate every session (about 2 min). Tracking gets worse in dark lighting or with dark clothes. | `C:\Users\bosco\Downloads\Moverse-Tracking-System Kopie.md` |
-| Moverse network endpoint | Live Link source `128.130.143.140:54321` | Lab preset `LiveLinkMoverseMRLab` |
+| Moverse network endpoint | Live Link source address and port of the Tracking PC: kept only in each machine's local `CLAUDE.md` (rule in section 2) | Lab preset `LiveLinkMoverseMRLab` |
 | Frontal camera on top of the wall | Mentioned by the owner for vision (G5). Model, connection and access method unknown. | Owner |
-| Lab rendering PC | Ran the 5.7 lab project through Switchboard as nDisplay node `Node_0` (host 127.0.0.1, fullscreen 2560x1536). Now runs UE 5.8. | Lab logs, owner |
+| Lab rendering PC | Ran the 5.7 lab project through Switchboard as nDisplay node `Node_0` (host: the rendering PC itself, fullscreen 2560x1536). Now runs UE 5.8. | Lab logs, owner |
 
 ### 3.2 Machines
 
@@ -101,7 +102,7 @@ The lab level also had SkyLight, DirectionalLight, SkyAtmosphere, VolumetricClou
 | | `NDC_Basic` (ported from the lab) | `NDC_HD_02` (pre-existing) |
 |---|---|---|
 | Asset | `/Game/ExampleConfigs/NDC_Basic` | `/Game/NDC_HD_02` |
-| Cluster | 1 node `Node_0`, 127.0.0.1, fullscreen 2560x1536 | 1 node, 1920x1080 |
+| Cluster | 1 node `Node_0` on the rendering PC itself, fullscreen 2560x1536 | 1 node, 1920x1080 |
 | Viewports | `VP_0` uses camera `ViewPointR`, `VP_1` uses `ViewPointL`. Both cover the full window (0, 0, 2560, 1536). Viewport remap on; `VP_1` is flipped horizontally. | 1 viewport, `DefaultViewPoint` |
 | Projection | Mesh policy on component `LEDWALL` (mesh `/Game/Assets/LEDWall`) | Simple policy on a flat screen |
 | Inner frustum cameras | `ICVFXCameraL`, `ICVFXCameraR` present; inner frustums disabled at stage level | None |
@@ -114,7 +115,7 @@ Details of `NDC_Basic`:
 - Lab crash history: 20 of the 23 crash reports in the 5.7 lab project were GPU crashes ("GPU Crashed or D3D Device Removed"), on 2026-06-16 and 2026-07-07 (see Q7).
 
 ### 4.4 Moverse integration
-- Live Link preset `/Game/Tracking/LiveLinkMoverseMRLab`: Moverse source `128.130.143.140:54321`, subject `Actor0` (animation role). It also contains an Apple ARKit Live Link source (port 11111) from the lab project. The file is byte-identical to the lab version and must not be re-saved on a machine without the Moverse plugin.
+- Live Link preset `/Game/Tracking/LiveLinkMoverseMRLab`: Moverse source (Tracking PC address in the local `CLAUDE.md`), subject `Actor0` (animation role). It also contains an Apple ARKit Live Link source from the lab project. The file is byte-identical to the lab version and must not be re-saved on a machine without the Moverse plugin.
 - `NDC_Basic` BeginPlay calls `ApplyToClient` on its variable `MoversePreset` (default: the preset above), so the Moverse source is set up at start. In the lab this was done by the level Blueprint (decision D9).
 - Head tracking in `NDC_Basic`: on `OnLiveLinkUpdated` of its `LiveLinkComponentController`, it reads bone `moverserig_Head` of subject `Actor0`, converts the location (x, y, z) to (z, -x, -y), and sets it as the relative location of `Rig`. The eye cameras follow `Rig`. A PrintString shows "INVALID" while no frame arrives.
 - `/Game/Actor0/`: Moverse rig skeletal mesh (`asset`), skeleton, physics asset and AnimBlueprint (`asset_Animation`). Bones are named `moverserig_*`.
@@ -210,6 +211,7 @@ Behaviour:
 
 Process:
 - **Q19.** The lab PC can pull from GitHub but cannot push. How do changes made on the lab PC (assets, config, README updates) get back into the repo?
+- **Q20.** The public repo still contains the Tracking PC address in two places: the Git history of README and the former `CLAUDE.lab.md` (commits `609ffc8`, `8ea546d`, `3666f5d`), and the binary preset `Content/Tracking/LiveLinkMoverseMRLab.uasset`. How to handle both is not decided.
 
 ## 7. Decisions log
 
@@ -227,12 +229,14 @@ Process:
 | D10 | 2026-10-21 | `MoversePlugin` marked optional in the `.uproject`, so the laptop opens the project without it. | Claude |
 | D11 | 2026-10-21 | AI editor access through UE's built-in MCP server plus Python remote execution. | Claude (plan approved by owner) |
 | D12 | 2026-10-21 | `CLAUDE.md` is per machine and not in Git; the lab PC gets its own version without GitHub steps (it has no push credentials). | Owner |
+| D13 | 2026-10-21 | The repo is public: no IP addresses of lab machines in tracked files; they live in each machine's local `CLAUDE.md`. | Owner |
 
 ## 8. Work log
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
 
 ### 2026-10-21 (Claude Code)
+- Removed IP addresses from this README and added the rule in section 2 (D13). The address is still in Git history and in the Moverse preset asset (Q20).
 - Stopped tracking `CLAUDE.md` (now in `.gitignore`, each machine keeps its own). Published the lab PC version as `CLAUDE.lab.md`; the owner copied it to `CLAUDE.md` on the lab PC, then `CLAUDE.lab.md` was deleted from the repo.
 - Added this README (handoff document) and the session workflow and gotchas in CLAUDE.md.
 - `67b75a7` Ported Moverse and nDisplay from `Frank Demo.zip`: preset, `Actor0` rig, `NDC_Basic` and its level actor, Live Link settings, optional Moverse plugin entry. Verified on the laptop: load, compile, Simulate run (4.4). Not verified on the lab PC.
