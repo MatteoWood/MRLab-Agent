@@ -211,7 +211,6 @@ Behaviour:
 
 Process:
 - **Q19.** The lab PC can pull from GitHub but cannot push. How do changes made on the lab PC (assets, config, README updates) get back into the repo?
-- **Q20.** The public repo still contains the Tracking PC address in two places: the Git history of README and the former `CLAUDE.lab.md` (commits `609ffc8`, `8ea546d`, `3666f5d`), and the binary preset `Content/Tracking/LiveLinkMoverseMRLab.uasset`. How to handle both is not decided.
 
 ## 7. Decisions log
 
@@ -230,13 +229,14 @@ Process:
 | D11 | 2026-10-21 | AI editor access through UE's built-in MCP server plus Python remote execution. | Claude (plan approved by owner) |
 | D12 | 2026-10-21 | `CLAUDE.md` is per machine and not in Git; the lab PC gets its own version without GitHub steps (it has no push credentials). | Owner |
 | D13 | 2026-10-21 | The repo is public: no IP addresses of lab machines in tracked files; they live in each machine's local `CLAUDE.md`. | Owner |
+| D14 | 2026-10-21 | Leave the Tracking PC address that remains in Git history and in the binary preset `LiveLinkMoverseMRLab.uasset` as it is: no history rewrite, repo stays public. | Owner |
 
 ## 8. Work log
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
 
 ### 2026-10-21 (Claude Code)
-- Removed IP addresses from this README and added the rule in section 2 (D13). The address is still in Git history and in the Moverse preset asset (Q20).
+- Removed IP addresses from this README and added the rule in section 2 (D13). The address remains in Git history and in the Moverse preset asset; the owner accepted this (D14).
 - Stopped tracking `CLAUDE.md` (now in `.gitignore`, each machine keeps its own). Published the lab PC version as `CLAUDE.lab.md`; the owner copied it to `CLAUDE.md` on the lab PC, then `CLAUDE.lab.md` was deleted from the repo.
 - Added this README (handoff document) and the session workflow and gotchas in CLAUDE.md.
 - `67b75a7` Ported Moverse and nDisplay from `Frank Demo.zip`: preset, `Actor0` rig, `NDC_Basic` and its level actor, Live Link settings, optional Moverse plugin entry. Verified on the laptop: load, compile, Simulate run (4.4). Not verified on the lab PC.
