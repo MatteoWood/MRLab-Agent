@@ -40,7 +40,7 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 - Development happens on the owner's laptop now. The project moves to the lab rendering PC later. This repo is the bridge between the two machines.
 - Version control is this GitHub repo (private, Git LFS for binaries). GitLab was too small for the project. The knowledge base stays in its own GitLab repo.
 - AI tooling is Claude Code. Codex is no longer used.
-- `CLAUDE.md` (agent instructions) is machine-specific and ignored by Git. The laptop version includes committing and pushing to GitHub. The lab PC has no push credentials for GitHub, so its version has no GitHub steps. The lab version is published once as `CLAUDE.lab.md` so the owner can copy it to `CLAUDE.md` on the lab PC; `CLAUDE.lab.md` is removed from the repo afterwards.
+- `CLAUDE.md` (agent instructions) is machine-specific and ignored by Git. The laptop version includes committing and pushing to GitHub. The lab PC has no push credentials for GitHub, so its version has no GitHub steps. Both files exist only locally on their machine (laptop: `C:\Users\bosco\Documents\Unreal Projects\MRLabProject 5.8\CLAUDE.md`; lab PC: `CLAUDE.md` in its clone, created on 2026-10-21 from the former `CLAUDE.lab.md`, commit `8ea546d`).
 
 ## 3. Environment
 
@@ -233,7 +233,7 @@ Process:
 Newest first. One entry per work session: what was done, what was verified, what is left.
 
 ### 2026-10-21 (Claude Code)
-- Stopped tracking `CLAUDE.md` (now in `.gitignore`, each machine keeps its own). Published the lab PC version as `CLAUDE.lab.md`. Pending: the owner copies it to `CLAUDE.md` on the lab PC, then `CLAUDE.lab.md` is deleted from the repo.
+- Stopped tracking `CLAUDE.md` (now in `.gitignore`, each machine keeps its own). Published the lab PC version as `CLAUDE.lab.md`; the owner copied it to `CLAUDE.md` on the lab PC, then `CLAUDE.lab.md` was deleted from the repo.
 - Added this README (handoff document) and the session workflow and gotchas in CLAUDE.md.
 - `67b75a7` Ported Moverse and nDisplay from `Frank Demo.zip`: preset, `Actor0` rig, `NDC_Basic` and its level actor, Live Link settings, optional Moverse plugin entry. Verified on the laptop: load, compile, Simulate run (4.4). Not verified on the lab PC.
 - Compared `Frank Demo.zip` (5.7, 2026-07-07) with this project. Other config files match. Findings are in 4.3 and 4.4.
