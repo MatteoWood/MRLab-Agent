@@ -3,7 +3,7 @@
 Conversational MetaHuman agent for the curved LED wall of the TU Wien Mixed Reality Lab (MRLab, Vienna).
 Unreal Engine 5.8 project: `MRLabProject58.uproject`.
 
-This README is the handoff document. Anyone (person or AI agent) continuing the work starts here, then reads [CLAUDE.md](CLAUDE.md) for how to operate the editor. Keep sections 4 (current state), 6 (open questions), 7 (decisions) and 8 (work log) up to date at the end of every work session.
+This README is the handoff document. Anyone (person or AI agent) continuing the work starts here, then reads the local `CLAUDE.md` of the machine they work on for how to operate the editor. `CLAUDE.md` is not tracked in Git: each machine keeps its own (see section 2). Keep sections 4 (current state), 6 (open questions), 7 (decisions) and 8 (work log) up to date at the end of every work session.
 
 ## Contents
 1. [Goals](#1-goals)
@@ -40,6 +40,7 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 - Development happens on the owner's laptop now. The project moves to the lab rendering PC later. This repo is the bridge between the two machines.
 - Version control is this GitHub repo (private, Git LFS for binaries). GitLab was too small for the project. The knowledge base stays in its own GitLab repo.
 - AI tooling is Claude Code. Codex is no longer used.
+- `CLAUDE.md` (agent instructions) is machine-specific and ignored by Git. The laptop version includes committing and pushing to GitHub. The lab PC has no push credentials for GitHub, so its version has no GitHub steps. The lab version is published once as `CLAUDE.lab.md` so the owner can copy it to `CLAUDE.md` on the lab PC; `CLAUDE.lab.md` is removed from the repo afterwards.
 
 ## 3. Environment
 
@@ -128,7 +129,7 @@ Details of `NDC_Basic`:
 - On 2026-10-21 the editor showed `BP_Agent` as modified but unsaved, without anyone editing it in that session. It was left unsaved.
 
 ### 4.6 Tooling for AI agents
-Described in [CLAUDE.md](CLAUDE.md): UE's built-in MCP server (`.mcp.json`), Python remote execution (`Tools/ue_py.py`), viewport capture (`Tools/capture_viewport.py`), and direct file access.
+Described in each machine's local `CLAUDE.md`: UE's built-in MCP server (`.mcp.json`), Python remote execution (`Tools/ue_py.py`), viewport capture (`Tools/capture_viewport.py`), and direct file access.
 
 ## 5. Roadmap
 
@@ -144,7 +145,7 @@ Generic steps. A precise plan is written and agreed before each step starts (sec
 ### Step 3. Lab PC setup and validation: TODO
 - Goal: the project runs on the lab rendering PC with nDisplay stereo on the wall and live Moverse tracking.
 - Known inputs: 4.3, 4.4, 3.2.
-- Open: Q1 to Q8.
+- Open: Q1 to Q8, Q19.
 - Detailed plan: not written yet.
 
 ### Step 4. Conversation with gpt-live-1: TODO
@@ -207,6 +208,9 @@ Tracking and vision:
 Behaviour:
 - **Q18.** Lip sync and animation approach for Step 8 (ACE Audio2Face, MetaHuman features, other). Decide when Step 8 starts.
 
+Process:
+- **Q19.** The lab PC can pull from GitHub but cannot push. How do changes made on the lab PC (assets, config, README updates) get back into the repo?
+
 ## 7. Decisions log
 
 | ID | Date | Decision | By |
@@ -222,12 +226,14 @@ Behaviour:
 | D9 | 2026-10-21 | Apply the Moverse preset in `NDC_Basic` BeginPlay instead of the level Blueprint. The level Blueprint cannot be edited from Python, and the 5.8 level has none. | Claude |
 | D10 | 2026-10-21 | `MoversePlugin` marked optional in the `.uproject`, so the laptop opens the project without it. | Claude |
 | D11 | 2026-10-21 | AI editor access through UE's built-in MCP server plus Python remote execution. | Claude (plan approved by owner) |
+| D12 | 2026-10-21 | `CLAUDE.md` is per machine and not in Git; the lab PC gets its own version without GitHub steps (it has no push credentials). | Owner |
 
 ## 8. Work log
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
 
 ### 2026-10-21 (Claude Code)
+- Stopped tracking `CLAUDE.md` (now in `.gitignore`, each machine keeps its own). Published the lab PC version as `CLAUDE.lab.md`. Pending: the owner copies it to `CLAUDE.md` on the lab PC, then `CLAUDE.lab.md` is deleted from the repo.
 - Added this README (handoff document) and the session workflow and gotchas in CLAUDE.md.
 - `67b75a7` Ported Moverse and nDisplay from `Frank Demo.zip`: preset, `Actor0` rig, `NDC_Basic` and its level actor, Live Link settings, optional Moverse plugin entry. Verified on the laptop: load, compile, Simulate run (4.4). Not verified on the lab PC.
 - Compared `Frank Demo.zip` (5.7, 2026-07-07) with this project. Other config files match. Findings are in 4.3 and 4.4.

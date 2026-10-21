@@ -8,3 +8,4 @@ Plugins/*/Intermediate/
 *.sln
 *.VC.db
 __pycache__/
+CLAUDE.md
