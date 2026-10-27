@@ -113,6 +113,10 @@
 			"Name": "MoversePlugin",
 			"Enabled": true,
 			"Optional": true
+		},
+		{
+			"Name": "MRLabLive",
+			"Enabled": true
 		}
 	]
 }

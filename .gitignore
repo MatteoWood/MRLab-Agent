@@ -3,6 +3,8 @@ Intermediate/
 Saved/
 DerivedDataCache/
 Plugins/*/Binaries/
+!Plugins/MRLabLive/Binaries/
+Plugins/MRLabLive/Binaries/**/*.pdb
 Plugins/*/Intermediate/
 .vs/
 *.sln

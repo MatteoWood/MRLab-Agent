@@ -1,0 +1,26 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "MRLab Live",
+	"Description": "Spoken conversation with OpenAI gpt-live-1 through the Live API: microphone in, agent voice out.",
+	"Category": "MRLab",
+	"CreatedBy": "TU Wien MRLab",
+	"CanContainContent": false,
+	"Modules": [
+		{
+			"Name": "MRLabLive",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64"
+			]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "AudioCapture",
+			"Enabled": true
+		}
+	]
+}
