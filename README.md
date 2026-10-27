@@ -63,8 +63,8 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 
 | Machine | Role | Notes |
 |---|---|---|
-| Owner laptop | Development now | UE 5.8 at `C:\Program Files\Epic Games\UE_5.8`, Visual Studio 2022 17.14, Git + Git LFS, Python (Anaconda). Moverse plugin copied from the lab PC as a project plugin, not in Git, with one laptop-only change (4.4); local fake tracking script, not in Git (4.4). |
-| Lab rendering PC | Target | UE 5.8 at `C:\Program Files\Epic Games\UE_5.8`. No Python on PATH (use the engine's bundled Python). In the 5.7 setup the Moverse plugin was installed in the engine (`Engine/Plugins/Marketplace/MoversePlugin`, plus a duplicate under `Engine/Plugins/Runtime/Marketplace/MoversePlugin`). For 5.8 the plugin is a project plugin in `Plugins/MoversePlugin`, not in Git (D15). Read-only Git access (cannot push, Q19). |
+| Owner laptop | Development now | UE 5.8 at `C:\Program Files\Epic Games\UE_5.8`, Visual Studio 2022 17.14, Git + Git LFS, Python (Anaconda). Builds the `MRLabLive` plugin (4.8). Moverse plugin copied from the lab PC as a project plugin, not in Git, with one laptop-only change (4.4); local fake tracking script, not in Git (4.4). OpenAI key in `Saved/OpenAIKey.txt` (4.8). |
+| Lab rendering PC | Target | UE 5.8 at `C:\Program Files\Epic Games\UE_5.8`. No Python on PATH (use the engine's bundled Python). Uses the committed `MRLabLive` DLL; needs its own `Saved/OpenAIKey.txt` (not there yet). In the 5.7 setup the Moverse plugin was installed in the engine (`Engine/Plugins/Marketplace/MoversePlugin`, plus a duplicate under `Engine/Plugins/Runtime/Marketplace/MoversePlugin`). For 5.8 the plugin is a project plugin in `Plugins/MoversePlugin`, not in Git (D15). Read-only Git access (cannot push, Q19). |
 
 ### 3.3 Repositories and paths
 
@@ -80,12 +80,12 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 
 ## 4. Current state
 
-State on 2026-10-27: the lab PC changes of 2026-10-21 are now in the repo (section 8). On the lab PC the wall runs head-tracked stereo 3D with live Moverse tracking (verified by the owner on 2026-10-21).
+State on 2026-10-27: the lab PC changes of 2026-10-21 are now in the repo (section 8). On the lab PC the wall runs head-tracked stereo 3D with live Moverse tracking (verified by the owner on 2026-10-21). On the laptop the agent holds a spoken English conversation through gpt-live-1 (4.8); not tested on the lab PC yet.
 
 ### 4.1 Project setup
-- Blueprint-only (no `Source/` folder). Not decided whether C++ will be needed (see Q9).
+- No project `Source/` folder. C++ lives in the project plugin `Plugins/MRLabLive` (4.8, D25). Building it also makes the build tool generate a stub project module and `Binaries/Win64/MRLabProject58Editor.target`; both are ignored by Git and not needed to run.
 - Main level: `/Game/DefaultMap` (World Partition).
-- Plugins enabled in `MRLabProject58.uproject`: MetaHuman set (MetaHuman, MetaHumanCalibrationProcessing, MetaHumanCoreTech, MetaHumanLiveLink, MetaHumanCharacter), MovieRenderPipeline, NVIDIA ACE (NV_ACE_Reference, NvAudio2FaceClaire, NvAudio2FaceJames, NvAudio2FaceMark), nDisplay, DisplayClusterLaunch, Switchboard, ModelingToolsEditorMode, editor AI tooling (ModelContextProtocol, EditorToolset, Terminal, ConfigSettingsToolset, SlateInspectorToolset, LiveCodingToolset), and `MoversePlugin` marked `"Optional": true` (D10).
+- Plugins enabled in `MRLabProject58.uproject`: MetaHuman set (MetaHuman, MetaHumanCalibrationProcessing, MetaHumanCoreTech, MetaHumanLiveLink, MetaHumanCharacter), MovieRenderPipeline, NVIDIA ACE (NV_ACE_Reference, NvAudio2FaceClaire, NvAudio2FaceJames, NvAudio2FaceMark), nDisplay, DisplayClusterLaunch, Switchboard, ModelingToolsEditorMode, editor AI tooling (ModelContextProtocol, EditorToolset, Terminal, ConfigSettingsToolset, SlateInspectorToolset, LiveCodingToolset), `MoversePlugin` marked `"Optional": true` (D10), and the project plugin `MRLabLive` (4.8).
 - Optional plugins in UE 5.8: in a Blueprint-only project on the Launcher engine, an optional plugin is only loaded if it is in the engine's build receipt (`Engine/Binaries/Win64/UnrealEditor.target`) or passed on the command line. So `MoversePlugin` is skipped silently even when installed, unless the process starts with `-EnablePlugins=MoversePlugin` (D16, Q20).
 - Config: `DefaultEngine.ini` enables Python remote execution (`bRemoteExecution=True`). `DefaultGame.ini` holds the Live Link settings copied from the lab project. `DefaultDisplayClusterLaunch.ini` (new, lab PC) holds the nDisplay Launch arguments, including `EnablePlugins=MoversePlugin`. `Config/nDisplay/StereoCheckerboardRemap.obj` (new, lab PC) is the nDisplay output remap mesh for the 3D output (4.3).
 
@@ -145,7 +145,8 @@ Details of `NDC_Basic`:
 - Components include `ACEAudioCurveSourceComponent` (NVIDIA ACE Audio2Face), `MetaHumanComponentUE`, grooms, LODSync.
 - Event graph: BeginPlay enables input for player controller 0. OnAnimInitialized (Face, Body) runs the standard MetaHuman `LiveLinkSetup`. A keyboard event `T` exists; when read as text it showed no attached nodes (not confirmed in the Blueprint editor).
 - Test audio: `/Game/Audio/test_audio`.
-- No conversation, RAG, tracking-driven behaviour, vision or UI yet.
+- Component `LiveSession` (`MRLabLiveSession`, 4.8). BeginPlay (after EnableInput) calls `StartSession`. `OnUserTranscript` and `OnAgentTranscript` go to PrintString with keys `User` / `Agent`, so each side shows one growing line on screen (hidden in nDisplay nodes by `DisableAllScreenMessages`) and in the log.
+- No RAG, tracking-driven behaviour, vision or UI yet.
 - On 2026-10-21 the editor showed `BP_Agent` as modified but unsaved, without anyone editing it in that session. It was left unsaved.
 
 ### 4.6 Tooling for AI agents
@@ -157,6 +158,16 @@ Described in each machine's local `CLAUDE.md`: UE's built-in MCP server (`.mcp.j
 - Light sources: only the emissive materials of the `MRLab` model (`M_LightsCold`, `M_LightsWarm`), as the owner asked; `SpotLight` is switched off (D22).
 - Exposure: `PPV_FixedExposure` locks auto exposure at -2.9 EV100 for the editor, PIE and nDisplay. Before, each eye's viewport adapted on its own, so the brightness and colour changed with the user's position. -2.9 was chosen by matching the average brightness of the previous automatic exposure in the room; each +1 halves the brightness.
 - Known remaining effects: the bounce light from the emissive materials (Lumen) is computed per view and may still change slightly with the viewer's position; a pale, noisy silhouette of the agent appears on the back wall in editor captures (Lumen artifact, not investigated) (Q22).
+
+### 4.8 Conversation (`Plugins/MRLabLive`)
+- C++ project plugin, one Runtime module, Win64 only (D25). Source and the built `UnrealEditor-MRLabLive.dll` + `UnrealEditor.modules` are in Git (DLL via LFS, the `.pdb` is not), so the lab PC runs it without a compiler (D27). The DLL only loads in an engine with the same build ID (5.8.0 changelist 55116800 on both machines); after an engine update it must be rebuilt on the laptop and committed again.
+- Rebuild (editor closed): `Engine\Build\BatchFiles\Build.bat Development Win64 -Project=<uproject> -TargetType=Editor -NoEngineChanges`.
+- Component `UMRLabLiveSession` (`MRLabLive Session` in the Add Component list). Properties `Model` (`gpt-live-1`), `Voice` (`marin`), `Instructions` (English-only lab technician prompt adapted from the `realtime_rag` prototype; edit it on `BP_Agent`). `StartSession` / `StopSession`; events `OnUserTranscript`, `OnAgentTranscript` (text of the current utterance so far), `OnSessionClosed` (reason). Log category `LogMRLabLive`; each finished utterance is logged as `User: ...` / `Agent: ...`.
+- API key: one line in `Saved/OpenAIKey.txt` on each machine (D26). `Saved/` is ignored by Git, but it is included when the whole project folder is zipped. Without the file the component logs an error and does nothing.
+- Live API, as used (verified on 2026-10-27 against the API): WebSocket `wss://api.openai.com/v1/live/sessions`, header `Authorization: Bearer <key>`, first message `session.start` with `model`, `instructions`, `audio.format` (`audio/pcm`, 24000) and `audio.output.voice`; no `delegation`, so the session runs in client delegation mode. Mic audio goes up as `session.input_audio.append` (base64 PCM16 mono 24 kHz, sent every frame); the voice comes back as `session.output_audio.delta`, a continuous real-time stream in 100 ms chunks (silence included); the model decides itself when to speak and handles interruptions. Transcripts: `session.input_transcript.delta`, `session.output_transcript.delta`. Sessions expire 2 hours after start (`expires_at`); the component only logs the close, it does not restart (Q25). Price: $0.05 per session minute.
+- The handshake is refused (403) when the request carries an `Origin` header. Unreal's own WebSocket client (libwebsockets on Windows) always sends one, so the plugin uses the Windows WinHttp WebSocket API instead (D29).
+- Microphone: default Windows recording device through `AudioCapture`, mixed to mono and resampled to 24 kHz. No echo cancellation: the agent may hear itself through open speakers (Q24). Voice: a procedural sound wave on an audio component attached to the agent (2D, no attenuation).
+- Tested on the laptop (2026-10-27), with a spoken question played through the laptop speakers into the laptop microphone: in Play-In-Editor and in an nDisplay node (`NDC_Basic` / `Node_0`, `-game`), the session starts, the question is transcribed correctly and the agent answers (transcripts in the logs). Closing the node ends it cleanly. The agent's answer did not come back as user speech in these short tests. Also checked: the editor loads the plugin from the committed DLL with the project's own `Binaries` folder removed, as on the lab PC.
 
 ## 5. Roadmap
 
@@ -174,11 +185,10 @@ Generic steps. A precise plan is written and agreed before each step starts (sec
 - Result: head-tracked stereo 3D on the wall with live Moverse tracking, launched from the editor with nDisplay Launch (4.3, 4.4, 4.7). Verified by the owner.
 - Remaining: a regular way to get lab PC changes into the repo (Q19); Moverse plugin long term (Q20); decide on the engine shader dependency (Q21); lighting stability and eye offset fine-tuning (Q22, Q23); Q4, Q7, Q8.
 
-### Step 4. Conversation with gpt-live-1: TODO
+### Step 4. Conversation with gpt-live-1: DONE on the laptop (2026-10-27), lab PC test pending
 - Goal: the agent holds a spoken conversation with a user through OpenAI `gpt-live-1` (G1, G2).
-- Known inputs: model docs link (G2). No integration exists yet.
-- Open: Q9, Q10, Q11.
-- Detailed plan: not written yet.
+- Result: plugin `MRLabLive` and the `LiveSession` component on `BP_Agent` (4.5, 4.8). Tested on the laptop in Play-In-Editor and in an nDisplay node, with recorded speech through the speakers.
+- Remaining: a real conversation with a person; the lab PC (key file, microphone and speakers, echo, Q24); session expiry (Q25).
 
 ### Step 5. Knowledge base and realtime RAG: TODO
 - Goal: the agent answers questions about the lab from the GitLab knowledge base, in real time, and survives dataset changes (G3, G3a, G3b).
@@ -221,12 +231,14 @@ Lab and display:
 - **Q23.** Tracking fine-tuning: add the head-bone-to-eye offset (about 8 cm forward) and check for a small rotation between the tracking axes and the wall?
 
 Conversation:
-- **Q9.** Will the project need C++ (for example for realtime audio streaming or a WebSocket client), or can it stay Blueprint-only? Not decided.
-- **Q10.** How gpt-live-1 is connected from Unreal (transport, audio capture and playback, session handling). Read the model docs first.
-- **Q11.** Where the OpenAI API key is stored on each machine. Rule so far: never in tracked files.
+- **Q9.** ANSWERED 2026-10-27: C++, in the project plugin `MRLabLive` (D25).
+- **Q10.** ANSWERED 2026-10-27: Live API WebSocket from inside Unreal (WinHttp), microphone through `AudioCapture`, voice through a procedural sound wave (4.8, D25, D29).
+- **Q11.** ANSWERED 2026-10-27: `Saved/OpenAIKey.txt` on each machine (D26).
+- **Q24.** Lab microphone and speakers: which devices does the agent use, and does it hear itself (no echo cancellation)? Fallbacks if it does: mute the mic while the agent speaks (`session.input_audio.mute`, but then visitors cannot interrupt), a directional microphone, or a headset.
+- **Q25.** Sessions end after 2 hours (or on network loss). Should the agent start a new session automatically, or on a trigger (for example when a visitor steps in front of the wall)?
 
 Knowledge base:
-- **Q12.** RAG approach: does the gpt-live-1 API offer something simpler and more effective than tokenizing the dataset locally on every change? Compare with the `realtime_rag` prototype.
+- **Q12.** RAG approach: does the gpt-live-1 API offer something simpler and more effective than tokenizing the dataset locally on every change? Compare with the `realtime_rag` prototype. Found in Step 4: the Live API can hand requests to a backend model with hosted file search over an OpenAI vector store ("Responses delegation"); not tried.
 - **Q13.** How and when the dataset is updated from GitLab (manual "update dataset" function, check at startup, other).
 - **Q14.** Access to the knowledge repo from the lab PC (credentials, network).
 
@@ -269,10 +281,26 @@ Process:
 | D22 | 2026-10-21 | Only the lab model's emissive materials light the scene; `SpotLight` switched off. Exposure fixed at -2.9 EV100 with `PPV_FixedExposure`. | Owner (emissive only), Claude (exposure value) |
 | D23 | 2026-10-21 | `LEDWall` model actor hidden in game: it sits exactly on the projection surface and would cover the view. | Claude |
 | D24 | 2026-10-21 | Mandatory rule for AI agents on the lab PC: change nothing outside `C:\Users\VR Group\Documents\Unreal Projects\Matteo\` (reading and temp files are allowed). Written in `CLAUDE.md` / `CLAUDE.lab.md`. | Owner |
+| D25 | 2026-10-27 | The conversation (connection to OpenAI, microphone, agent voice) runs inside Unreal in a small C++ project plugin, not in an external program. Answers Q9, Q10. | Owner |
+| D26 | 2026-10-27 | The OpenAI API key is kept in an untracked file in the project: `Saved/OpenAIKey.txt`. Answers Q11. | Owner (untracked file), Claude (path) |
+| D27 | 2026-10-27 | The built plugin DLL is committed to Git (LFS), so the lab PC needs no compiler. | Owner |
+| D28 | 2026-10-27 | The agent speaks English only. | Owner |
+| D29 | 2026-10-27 | The plugin talks to the Live API through WinHttp instead of the engine's WebSocket module, because the engine's client always sends an `Origin` header and the Live API refuses those handshakes. The plugin is Win64 only. | Claude |
 
 ## 8. Work log
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
+
+### 2026-10-27 (Claude Code, laptop): Step 4, conversation with gpt-live-1
+Done:
+- Owner chose Step 4 next and answered Q9 to Q11 (D25 to D28).
+- Found that `gpt-live-1` runs on OpenAI's Live API, not the Realtime API of the `realtime_rag` prototype (different events, no turn-detection settings); checked the protocol with a throwaway Python script against the API.
+- New plugin `Plugins/MRLabLive` (4.8): Live API connection over WinHttp (D29), microphone in, voice out, transcripts as Blueprint events. `BP_Agent` got the `LiveSession` component, wired to BeginPlay and PrintString (4.5).
+- `.gitignore` keeps this plugin's binaries (without `.pdb`); `.gitattributes` stores `*.dll` in LFS. `MRLabLive` added to the `.uproject`.
+- API key copied from the prototype's `.env` into `Saved/OpenAIKey.txt` on the laptop (owner's instruction).
+Verified on the laptop: the plugin builds; the editor loads it from the committed DLL without the project's `Binaries` folder; with a recorded question played through the speakers, Play-In-Editor and an nDisplay node both transcribe it and the agent answers (logs); the node closes cleanly.
+Not verified: a live conversation with a person; how the voice sounds (nobody listened during the tests; in the background editor the frame rate drops to about 3 fps, which may make playback choppy there); echo during long answers; anything on the lab PC.
+Left: Q24, Q25; on the lab PC create `Saved/OpenAIKey.txt`, then pull and test with the lab microphone and speakers. Earlier open items unchanged (Q4, Q7, Q8, Q19 to Q23).
 
 ### 2026-10-27 (Claude Code, laptop): fake Moverse data
 Done:
