@@ -63,8 +63,8 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 
 | Machine | Role | Notes |
 |---|---|---|
-| Owner laptop | Development now | UE 5.8 at `C:\Program Files\Epic Games\UE_5.8`, Visual Studio 2022 17.14, Git + Git LFS, Python (Anaconda). Builds the `MRLabLive` plugin (4.8). Moverse plugin copied from the lab PC as a project plugin, not in Git, with one laptop-only change (4.4); local fake tracking script, not in Git (4.4). OpenAI key in `Saved/OpenAIKey.txt` (4.8). |
-| Lab rendering PC | Target | UE 5.8 at `C:\Program Files\Epic Games\UE_5.8`. No Python on PATH (use the engine's bundled Python). Uses the committed `MRLabLive` DLL; needs its own `Saved/OpenAIKey.txt` (not there yet). In the 5.7 setup the Moverse plugin was installed in the engine (`Engine/Plugins/Marketplace/MoversePlugin`, plus a duplicate under `Engine/Plugins/Runtime/Marketplace/MoversePlugin`). For 5.8 the plugin is a project plugin in `Plugins/MoversePlugin`, not in Git (D15). Read-only Git access (cannot push, Q19). |
+| Owner laptop | Development now | UE 5.8 at `C:\Program Files\Epic Games\UE_5.8`, Visual Studio 2022 17.14, Git + Git LFS, Python (Anaconda). Builds the `MRLabLive` plugin (4.8). Moverse plugin copied from the lab PC as a project plugin, not in Git, with one laptop-only change (4.4); local fake tracking script, not in Git (4.4). OpenAI key in `Saved/OpenAIKey.txt` (4.8), GitLab token in `Saved/GitLabToken.txt` (4.9). |
+| Lab rendering PC | Target | UE 5.8 at `C:\Program Files\Epic Games\UE_5.8`. No Python on PATH (use the engine's bundled Python). Uses the committed `MRLabLive` DLL; needs its own `Saved/OpenAIKey.txt` and `Saved/GitLabToken.txt` (not there yet). In the 5.7 setup the Moverse plugin was installed in the engine (`Engine/Plugins/Marketplace/MoversePlugin`, plus a duplicate under `Engine/Plugins/Runtime/Marketplace/MoversePlugin`). For 5.8 the plugin is a project plugin in `Plugins/MoversePlugin`, not in Git (D15). Read-only Git access (cannot push, Q19). |
 
 ### 3.3 Repositories and paths
 
@@ -80,7 +80,7 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 
 ## 4. Current state
 
-State on 2026-10-27: the lab PC changes of 2026-10-21 are now in the repo (section 8). On the lab PC the wall runs head-tracked stereo 3D with live Moverse tracking (verified by the owner on 2026-10-21). On the laptop the agent holds a spoken English conversation through gpt-live-1 (4.8); not tested on the lab PC yet.
+State on 2026-10-27: the lab PC changes of 2026-10-21 are now in the repo (section 8). On the lab PC the wall runs head-tracked stereo 3D with live Moverse tracking (verified by the owner on 2026-10-21). On the laptop the agent holds a spoken English conversation through gpt-live-1 (4.8) and answers lab questions from the GitLab knowledge base (4.9); neither is tested on the lab PC yet.
 
 ### 4.1 Project setup
 - No project `Source/` folder. C++ lives in the project plugin `Plugins/MRLabLive` (4.8, D25). Building it also makes the build tool generate a stub project module and `Binaries/Win64/MRLabProject58Editor.target`; both are ignored by Git and not needed to run.
@@ -162,12 +162,20 @@ Described in each machine's local `CLAUDE.md`: UE's built-in MCP server (`.mcp.j
 ### 4.8 Conversation (`Plugins/MRLabLive`)
 - C++ project plugin, one Runtime module, Win64 only (D25). Source and the built `UnrealEditor-MRLabLive.dll` + `UnrealEditor.modules` are in Git (DLL via LFS, the `.pdb` is not), so the lab PC runs it without a compiler (D27). The DLL only loads in an engine with the same build ID (5.8.0 changelist 55116800 on both machines); after an engine update it must be rebuilt on the laptop and committed again.
 - Rebuild (editor closed): `Engine\Build\BatchFiles\Build.bat Development Win64 -Project=<uproject> -TargetType=Editor -NoEngineChanges`.
-- Component `UMRLabLiveSession` (`MRLabLive Session` in the Add Component list). Properties `Model` (`gpt-live-1`), `Voice` (`marin`), `Instructions` (English-only lab technician prompt adapted from the `realtime_rag` prototype; edit it on `BP_Agent`). `StartSession` / `StopSession`; events `OnUserTranscript`, `OnAgentTranscript` (text of the current utterance so far), `OnSessionClosed` (reason). Log category `LogMRLabLive`; each finished utterance is logged as `User: ...` / `Agent: ...`.
+- Component `UMRLabLiveSession` (`MRLabLive Session` in the Add Component list). Properties `Model` (`gpt-live-1`), `Voice` (`marin`), `Instructions` (English-only lab technician prompt adapted from the `realtime_rag` prototype, with the rule to answer lab questions only from the lab knowledge (4.9); edit it on `BP_Agent`). `StartSession` / `StopSession`; events `OnUserTranscript`, `OnAgentTranscript` (text of the current utterance so far), `OnSessionClosed` (reason). Log category `LogMRLabLive`; each finished utterance is logged as `User: ...` / `Agent: ...`.
 - API key: one line in `Saved/OpenAIKey.txt` on each machine (D26). `Saved/` is ignored by Git, but it is included when the whole project folder is zipped. Without the file the component logs an error and does nothing.
 - Live API, as used (verified on 2026-10-27 against the API): WebSocket `wss://api.openai.com/v1/live/sessions`, header `Authorization: Bearer <key>`, first message `session.start` with `model`, `instructions`, `audio.format` (`audio/pcm`, 24000) and `audio.output.voice`; no `delegation`, so the session runs in client delegation mode. Mic audio goes up as `session.input_audio.append` (base64 PCM16 mono 24 kHz, sent every frame); the voice comes back as `session.output_audio.delta`, a continuous real-time stream in 100 ms chunks (silence included); the model decides itself when to speak and handles interruptions. Transcripts: `session.input_transcript.delta`, `session.output_transcript.delta`. Sessions expire 2 hours after start (`expires_at`); the component only logs the close, it does not restart (Q25). Price: $0.05 per session minute.
 - The handshake is refused (403) when the request carries an `Origin` header. Unreal's own WebSocket client (libwebsockets on Windows) always sends one, so the plugin uses the Windows WinHttp WebSocket API instead (D29).
 - Microphone: default Windows recording device through `AudioCapture`, mixed to mono and resampled to 24 kHz. No echo cancellation: the agent may hear itself through open speakers (Q24). Voice: a procedural sound wave on an audio component attached to the agent (2D, no attenuation).
 - Tested on the laptop (2026-10-27), with a spoken question played through the laptop speakers into the laptop microphone: in Play-In-Editor and in an nDisplay node (`NDC_Basic` / `Node_0`, `-game`), the session starts, the question is transcribed correctly and the agent answers (transcripts in the logs). Closing the node ends it cleanly. The agent's answer did not come back as user speech in these short tests. Also checked: the editor loads the plugin from the committed DLL with the project's own `Binaries` folder removed, as on the lab PC.
+
+### 4.9 Lab knowledge
+- Local copy: `Saved/Knowledge/` on each machine, ignored by Git (D33): the knowledge repo is private and this repo is public, so the files must never be committed here.
+- Update: editor toolbar button "Update Knowledge" (right end of the main toolbar), editor only (D31). `Content/Python/init_unreal.py` adds the button at editor start; `Content/Python/mrlab_knowledge.py` downloads the default branch of the knowledge repo as one zip through the GitLab API (header `PRIVATE-TOKEN`), unpacks all `.md` files into `Saved/Knowledge.new/` and then replaces `Saved/Knowledge/`. On any error the old files stay. A message box shows the number of files and the commit, or the error. The editor waits during the download.
+- GitLab token: one line in `Saved/GitLabToken.txt` on each machine (D32), read access (`read_api`). Present on the laptop since 2026-10-27; not on the lab PC.
+- Use (D30): at every session start the plugin reads all `.md` files in `Saved/Knowledge/` (sorted, subfolders included) and appends them to the instructions, each under `--- Knowledge file: <path> ---`. The log shows the file count and an estimate of the tokens. No search step and no extra cost (gpt-live-1 is billed per minute). Limit: the Live API takes up to 16384 instruction tokens, so the whole knowledge base must stay below about 15000 tokens (roughly 60 KB of Markdown); beyond that the approach must change (Q12 alternatives: OpenAI file search through delegation, or local search with injected snippets). New files take effect at the next session start (next Play or nDisplay Launch).
+- Knowledge repo on 2026-10-27: branch `main`, one file `Moverse-Tracking-System_Kopie.md` (about 800 tokens), commit `e8003aeb`.
+- Tested on the laptop (2026-10-27): the update downloads that file and the commit matches the repo; with a recorded question in Play-In-Editor the agent answered "Eight Luxonis OAK-D Pro W PoE cameras" (from the file) and "That I don't know" for a question the knowledge does not cover. The button appears on the toolbar; its command ran through Python remote execution, where the editor suppresses the message box, so the box itself has not been seen yet.
 
 ## 5. Roadmap
 
@@ -190,11 +198,10 @@ Generic steps. A precise plan is written and agreed before each step starts (sec
 - Result: plugin `MRLabLive` and the `LiveSession` component on `BP_Agent` (4.5, 4.8). Tested on the laptop in Play-In-Editor and in an nDisplay node, with recorded speech through the speakers.
 - Remaining: a real conversation with a person; the lab PC (key file, microphone and speakers, echo, Q24); session expiry (Q25).
 
-### Step 5. Knowledge base and realtime RAG: TODO
+### Step 5. Knowledge base and realtime RAG: DONE on the laptop (2026-10-27), lab PC test pending
 - Goal: the agent answers questions about the lab from the GitLab knowledge base, in real time, and survives dataset changes (G3, G3a, G3b).
-- Known inputs: knowledge repo, earlier prototype `realtime_rag`.
-- Open: Q12, Q13, Q14.
-- Detailed plan: not written yet.
+- Result: "Update Knowledge" editor button downloads the repo into `Saved/Knowledge/`; every session puts all local files into the agent's instructions (4.9, D30 to D33).
+- Remaining: lab PC (token file, access to GitLab from its network, Q14); switch approach when the knowledge outgrows the instruction limit (4.9).
 
 ### Step 6. Gaze following: TODO
 - Goal: the agent follows the user with its gaze using Moverse (G4).
@@ -238,9 +245,9 @@ Conversation:
 - **Q25.** Sessions end after 2 hours (or on network loss). Should the agent start a new session automatically, or on a trigger (for example when a visitor steps in front of the wall)?
 
 Knowledge base:
-- **Q12.** RAG approach: does the gpt-live-1 API offer something simpler and more effective than tokenizing the dataset locally on every change? Compare with the `realtime_rag` prototype. Found in Step 4: the Live API can hand requests to a backend model with hosted file search over an OpenAI vector store ("Responses delegation"); not tried.
-- **Q13.** How and when the dataset is updated from GitLab (manual "update dataset" function, check at startup, other).
-- **Q14.** Access to the knowledge repo from the lab PC (credentials, network).
+- **Q12.** ANSWERED 2026-10-27: all local knowledge files go into the session instructions, no retrieval step (D30). Alternatives for when the knowledge outgrows the instruction limit: OpenAI file search through Responses delegation (vector store; passing the store id through the Live API is not confirmed by the docs), or local keyword search with snippets injected through `session.thinking.append` (500 tokens each).
+- **Q13.** ANSWERED 2026-10-27: by hand with the editor button "Update Knowledge"; the agent only uses the local copy (D31).
+- **Q14.** Access to the knowledge repo from the lab PC: credentials answered (token file, D32); network access from the lab PC to `gitlab.tuwien.ac.at` not tested.
 
 Tracking and vision:
 - **Q15.** Which tracked user the agent looks at when several are present.
@@ -286,10 +293,23 @@ Process:
 | D27 | 2026-10-27 | The built plugin DLL is committed to Git (LFS), so the lab PC needs no compiler. | Owner |
 | D28 | 2026-10-27 | The agent speaks English only. | Owner |
 | D29 | 2026-10-27 | The plugin talks to the Live API through WinHttp instead of the engine's WebSocket module, because the engine's client always sends an `Origin` header and the Live API refuses those handshakes. The plugin is Win64 only. | Claude |
+| D30 | 2026-10-27 | Knowledge use: all local knowledge files go into the session instructions at session start, no retrieval step. Answers Q12. | Owner |
+| D31 | 2026-10-27 | Knowledge update by hand with an "Update Knowledge" button in the editor toolbar (not needed in the final app); it downloads from GitLab into a local copy, and the agent only uses the local copy. Answers Q13. | Owner |
+| D32 | 2026-10-27 | GitLab access through a read-only token in `Saved/GitLabToken.txt` on each machine. | Owner |
+| D33 | 2026-10-27 | Local knowledge copy in `Saved/Knowledge/` (ignored by Git, because the knowledge repo is private and this repo is public). Button written in the editor's Python (no C++ for an editor-only tool). | Claude |
 
 ## 8. Work log
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
+
+### 2026-10-27 (Claude Code, laptop): Step 5, lab knowledge
+Done:
+- Owner chose Step 5 next and decided Q12, Q13 and the GitLab access (D30 to D32).
+- "Update Knowledge" editor toolbar button (`Content/Python/init_unreal.py`, `Content/Python/mrlab_knowledge.py`) and knowledge loading in `MRLabLive` (4.9). Default instructions now tell the agent to answer lab questions only from the knowledge. Plugin rebuilt, DLL committed again.
+- A first access test with `git ls-remote` opened a GitLab sign-in window on the laptop (the repo is private); it was closed without signing in.
+Verified on the laptop: the update downloads the repo's one file (commit `e8003aeb`, matches GitLab); in Play-In-Editor the agent answers a question from that file correctly and says it does not know an uncovered one; the toolbar button appears with its label.
+Not verified: the message box after a real click (suppressed when run by remote scripting); knowledge in an nDisplay node (same code path as Play-In-Editor); anything on the lab PC.
+Left: lab PC needs `Saved/GitLabToken.txt` and `Saved/OpenAIKey.txt` and a test of GitLab access from its network (Q14); Q24, Q25 and earlier open items unchanged.
 
 ### 2026-10-27 (Claude Code, laptop): Step 4, conversation with gpt-live-1
 Done:
