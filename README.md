@@ -53,7 +53,7 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 | LED processor | Colorlight Z8t ("Z8t DP" = Windows `DISPLAY2`, "Z8t HDMI" = `DISPLAY3`). In its current mode it shows only the DP input, 1:1, as a 2D image; the HDMI input is not shown. Its 3D settings were not changed (hardware, outside the project). A config backup from 2025-10-15 is on the lab PC desktop (`coloradeptbackup20251015.capf`). | Lab PC, 2026-10-21 test |
 | LED wall mesh in this project | `/Game/Assets/LEDWall`: 494 cm wide, 300 cm high, 30 cm curve depth, 20 x 12 panels. Imported from `C:\Users\bosco\Desktop\MRLab model\LEDWall.fbx`. Each panel has its own 0..1 UVs, so it cannot be used for nDisplay mesh projection. `/Game/Assets/LEDWall_nDisplay` is a copy with one UV layout over the whole wall (u = arc length, v = top to bottom), used for the projection (D20). | Asset |
 | Moverse tracking | Markerless. 8 Luxonis OAK-D Pro W PoE cameras in a circle at the ceiling, covering the LED wall area. Tracking zone 5 m x 8 m, up to 4 users, 50 or 60 Hz. Tracking PC (server room) runs the Moverse capture software and sends data to the rendering PC. Calibrate every session (about 2 min). Tracking gets worse in dark lighting or with dark clothes. | `C:\Users\bosco\Downloads\Moverse-Tracking-System Kopie.md` |
-| Moverse network endpoint | Live Link source address and port of the Tracking PC: kept only in each machine's local `CLAUDE.md` (rule in section 2). UDP, bound on the rendering PC; only one process on the PC receives the data. | Lab preset `LiveLinkMoverseMRLab`, plugin source |
+| Moverse network endpoint | Live Link source address and port: kept only in each machine's local `CLAUDE.md` (rule in section 2). The plugin binds this address (UDP) on the PC that runs Unreal, so it is the rendering PC's own address, where the Tracking PC sends the data (from the plugin source); only one process on the PC receives the data. | Lab preset `LiveLinkMoverseMRLab`, plugin source |
 | Moverse coordinates | Head bone `moverserig_Head` in cm; after the axis conversion in `NDC_Basic` (4.4): +X towards the wall, Z = height above the floor. Measured 2026-10-21: middle of the wall surface at tracking (309, 16). | Calibration run (4.4) |
 | Frontal camera on top of the wall | Mentioned by the owner for vision (G5). Model, connection and access method unknown. | Owner |
 | Lab rendering PC | Ran the 5.7 lab project through Switchboard as nDisplay node `Node_0` (host: the rendering PC itself, fullscreen 2560x1536). Now runs UE 5.8. Displays: `DISPLAY2` 2560x1536 at (0, 0), primary, Z8t DP (the wall); `DISPLAY3` 2560x1536 at (2560, 0), Z8t HDMI; `DISPLAY1` 1920x1080 at (5120, 0), operator monitor. | Lab logs, owner, Windows |
@@ -63,7 +63,7 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 
 | Machine | Role | Notes |
 |---|---|---|
-| Owner laptop | Development now | UE 5.8 at `C:\Program Files\Epic Games\UE_5.8`, Visual Studio 2022 17.14, Git + Git LFS, Python (Anaconda). No Moverse plugin. |
+| Owner laptop | Development now | UE 5.8 at `C:\Program Files\Epic Games\UE_5.8`, Visual Studio 2022 17.14, Git + Git LFS, Python (Anaconda). Moverse plugin copied from the lab PC as a project plugin, not in Git, with one laptop-only change (4.4); local fake tracking script, not in Git (4.4). |
 | Lab rendering PC | Target | UE 5.8 at `C:\Program Files\Epic Games\UE_5.8`. No Python on PATH (use the engine's bundled Python). In the 5.7 setup the Moverse plugin was installed in the engine (`Engine/Plugins/Marketplace/MoversePlugin`, plus a duplicate under `Engine/Plugins/Runtime/Marketplace/MoversePlugin`). For 5.8 the plugin is a project plugin in `Plugins/MoversePlugin`, not in Git (D15). Read-only Git access (cannot push, Q19). |
 
 ### 3.3 Repositories and paths
@@ -136,6 +136,8 @@ Details of `NDC_Basic`:
 - Calibration (2026-10-21, D21): the owner stood with the head about 50 cm in front of the middle of the wall, then stepped 2 m straight back. Measured head positions: (259, 16, 155) and (58.5, 2, 159); distance 200.5 cm, so units and direction are right. Middle of the wall surface in tracking space: (309, 16). The `NDC_Basic` origin is the tracking origin; the wall is placed at the measured position. Not applied: the offset from the head bone to the eyes (about 8 cm forward), and a possible small rotation (Y changed by 14 cm over the 2 m step, which may also be the step not being straight) (Q23).
 - `/Game/Actor0/`: Moverse rig skeletal mesh (`asset`), skeleton, physics asset and AnimBlueprint (`asset_Animation`). Bones are named `moverserig_*`.
 - Tested on the laptop (2026-10-21): assets load, `NDC_Basic` compiles, a Simulate session runs BeginPlay and the tracking callback. Applying the preset fails on the laptop ("Could not apply") because the Moverse plugin is missing there.
+- Fake tracking on the laptop (2026-10-27): `Tools/moverse_sim.py` (local only, not in Git) sends the packets the plugin reads (JSON over UDP, subject `Actor0`, the 25 `moverserig_*` bones) with the head on a looping path; path parameters at the top of the script. The laptop's copy of the plugin falls back to listening on all local addresses when the preset address does not exist on the machine; the project, the preset and the lab PC are unchanged. How to run it is in the laptop's `CLAUDE.md`.
+- Rig axes of the Moverse data (from `/Game/Actor0/asset`): root bone `moverserig_Pivot`, X to the person's left, Y down, Z forward; standing head about 158 cm above the root. The plugin rotates the root bone by +90 degrees about X on arrival.
 - Tested on the lab PC (2026-10-21): plugin loads, preset applies, `Actor0` is connected, and the head position drives the view on the wall at runtime (verified by the owner).
 
 ### 4.5 Agent (`/Game/MetaHumans/Agent/BP_Agent`)
@@ -271,6 +273,14 @@ Process:
 ## 8. Work log
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
+
+### 2026-10-27 (Claude Code, laptop): fake Moverse data
+Done:
+- Fake tracking for testing without the lab (4.4): local script `Tools/moverse_sim.py`; Moverse plugin copied from the lab's `Plugins.zip` into `Plugins/MoversePlugin` (excluded from Git as on the lab PC) and rebuilt on the laptop with the fallback to all local addresses. Nothing tracked in the project changed.
+- Found from the plugin source that the preset address is bound on the receiving PC (3.1).
+Verified on the laptop: with the script running, Play in the editor prints the fake head positions from `NDC_Basic` (one `INVALID` on the first frame, then continuous values along the loop), `Rig` follows them, Live Link shows subject `Actor0`.
+Not verified: nDisplay Launch with the fake data on the laptop; that real Moverse sends the root rotation the script assumes (inferred from the lab head heights, no packet capture).
+Left: as before.
 
 ### 2026-10-27 (Claude Code, laptop)
 Done:
