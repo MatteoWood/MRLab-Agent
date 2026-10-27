@@ -1,0 +1,33 @@
+# nDisplay output remap for the polarized LED wall (NDC_Basic, node Node_0).
+# Frame: 5120x1536. Left eye (VP_1) at x 0..2559, right eye (VP_0) at x 2560..5119.
+# Output: DP (screen x 0..2559) = checkerboard of right and left eye; HDMI (2560..5119) = right eye.
+#
+# DEPENDS ON THE LAB'S MODIFIED ENGINE SHADER
+#   C:\Program Files\Epic Games\UE_5.8\Engine\Plugins\Runtime\nDisplay\Shaders\Private\OutputRemapShaders.usf
+# which, for source pixels with x < 2560, samples at (2560 - x) and discards every other pixel (checkerboard).
+# With the stock shader (OutputRemapShadersBACKUP.usf) this mesh shows a mirrored left eye on DP instead.
+#
+# nDisplay OBJ conventions: v x y z -> position (x, -y, z); screen x from -y, screen y from z (up), both
+# normalized to the mesh bounds; vt u v -> texture (u, 1 - v).
+# Draw order matters: face 1 (right eye, full) must come before face 3 (left eye, checkerboard on top).
+
+v 0 0 0
+v 0 -0.5 0
+v 0 -0.5 1
+v 0 0 1
+v 0 -1 0
+v 0 -1 1
+
+vt 0.5 0
+vt 1 0
+vt 1 1
+vt 0.5 1
+vt 0 0
+vt 0 1
+
+# 1: DP, right eye copied 1:1 (source x 2560..5119, untouched by the shader)
+f 1/1 2/2 3/3 4/4
+# 2: HDMI, right eye copied 1:1 (keeps the mesh bounds at full window width)
+f 2/1 5/2 6/3 3/4
+# 3: DP, left eye with reversed u; the shader mirrors it back and keeps every other pixel
+f 1/1 2/5 3/6 4/4
