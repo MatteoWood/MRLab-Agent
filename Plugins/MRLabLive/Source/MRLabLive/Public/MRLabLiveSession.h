@@ -18,6 +18,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FMRLabLiveText, const FString&, Text
  * Spoken conversation with OpenAI gpt-live-1 through the Live API (WebSocket over WinHttp, Windows only).
  * Streams the default microphone to the model and plays the agent's voice from the owning actor.
  * The API key is read from Saved/OpenAIKey.txt (one line, not in Git).
+ * At session start, every .md file in Saved/Knowledge is appended to the instructions as lab knowledge.
  */
 UCLASS(ClassGroup = (MRLab), meta = (BlueprintSpawnableComponent))
 class MRLABLIVE_API UMRLabLiveSession : public UActorComponent

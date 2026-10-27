@@ -5,6 +5,7 @@
 #include "AudioDefines.h"
 #include "Components/AudioComponent.h"
 #include "Dom/JsonObject.h"
+#include "HAL/FileManager.h"
 #include "Misc/Base64.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -23,6 +24,36 @@ namespace
 {
 	// Default audio format of the Live API: audio/pcm, 24 kHz, mono, 16 bit.
 	constexpr int32 LiveSampleRate = 24000;
+
+	/** All .md files in Saved/Knowledge (written by the editor's Update Knowledge button), one section per file. */
+	FString LoadKnowledge()
+	{
+		const FString Dir = FPaths::ProjectSavedDir() / TEXT("Knowledge");
+		TArray<FString> Files;
+		IFileManager::Get().FindFilesRecursive(Files, *Dir, TEXT("*.md"), true, false);
+		Files.Sort();
+
+		FString Knowledge;
+		for (const FString& File : Files)
+		{
+			FString Text;
+			FFileHelper::LoadFileToString(Text, *File);
+			FString Name = File;
+			FPaths::MakePathRelativeTo(Name, *(Dir + TEXT("/")));
+			Knowledge += FString::Printf(TEXT("\n\n--- Knowledge file: %s ---\n%s"), *Name, *Text);
+		}
+
+		if (Files.Num() == 0)
+		{
+			UE_LOG(LogMRLabLive, Warning, TEXT("No lab knowledge in %s; use Update Knowledge in the editor"), *FPaths::ConvertRelativePathToFull(Dir));
+		}
+		else
+		{
+			// Rough estimate (4 characters per token); the Live API allows up to 16384 instruction tokens.
+			UE_LOG(LogMRLabLive, Log, TEXT("Lab knowledge: %d files, about %d tokens"), Files.Num(), Knowledge.Len() / 4);
+		}
+		return Knowledge;
+	}
 }
 
 /**
@@ -155,7 +186,9 @@ UMRLabLiveSession::UMRLabLiveSession()
 	Instructions = TEXT(
 		"You are a funny technician in the Mixed Reality Lab of TU Wien. "
 		"You are helpful, witty and concise, and you speak like somebody who fixes "
-		"strange machines between coffee breaks. Always answer in English.");
+		"strange machines between coffee breaks. Always answer in English. "
+		"Answer questions about the lab from the lab knowledge below. If the knowledge does not cover "
+		"a question, say so clearly and do not invent lab facts.");
 }
 
 void UMRLabLiveSession::StartSession()
@@ -175,9 +208,12 @@ void UMRLabLiveSession::StartSession()
 		return;
 	}
 
+	const FString Knowledge = LoadKnowledge();
+	const FString FullInstructions = Knowledge.IsEmpty() ? Instructions : Instructions + TEXT("\n\nLab knowledge:") + Knowledge;
+
 	Socket = MakeShared<FLiveSocket>();
 	TWeakObjectPtr<UMRLabLiveSession> WeakThis(this);
-	Socket->OnOpened = [WeakThis]()
+	Socket->OnOpened = [WeakThis, FullInstructions]()
 	{
 		UMRLabLiveSession* This = WeakThis.Get();
 		if (!This)
@@ -194,7 +230,7 @@ void UMRLabLiveSession::StartSession()
 		Audio->SetObjectField(TEXT("output"), Output);
 		TSharedRef<FJsonObject> Session = MakeShared<FJsonObject>();
 		Session->SetStringField(TEXT("model"), This->Model);
-		Session->SetStringField(TEXT("instructions"), This->Instructions);
+		Session->SetStringField(TEXT("instructions"), FullInstructions);
 		Session->SetObjectField(TEXT("audio"), Audio);
 		TSharedRef<FJsonObject> Event = MakeShared<FJsonObject>();
 		Event->SetStringField(TEXT("type"), TEXT("session.start"));
