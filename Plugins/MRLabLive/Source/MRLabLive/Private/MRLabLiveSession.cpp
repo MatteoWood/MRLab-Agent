@@ -17,7 +17,9 @@
 #include "Serialization/JsonWriter.h"
 #include "Sound/SoundWaveProcedural.h"
 #include "GuiToRawControlsUtils.h"
+#include "NNE.h"
 #include "NNEModelData.h"
+#include "NNERuntimeCPU.h"
 #include "SpeechAnimationSolverV4.h"
 #include "UObject/Package.h"
 
@@ -41,6 +43,16 @@ namespace
 	constexpr float VoiceRms = 0.003f;
 	constexpr float MouthOpenPerStep = 0.35f;
 	constexpr float MouthClosePerStep = 0.1f;
+
+	// Delegation cannot be switched off in the session config (omitted means client delegation), so it is ruled out
+	// in the instructions, and any delegation that still happens is answered at once (see HandleMessage).
+	const TCHAR* NoDelegationRule = TEXT(
+		"Delegation policy: there is no backend and there are no tools. NEVER GENERATE <|SpawnThinking|>, "
+		"CHECK, SEARCH, LOOK UP OR USE TOOLS. Answer right away, only from the lab knowledge below and the conversation. "
+		"If the lab knowledge does not contain the answer, say that you do not know. Never promise to look something up.");
+	const TCHAR* DelegationReply = TEXT(
+		"Nothing can be looked up here, there is no backend. Answer now, only from the lab knowledge in your instructions. "
+		"If the answer is not in it, say that you do not know.");
 
 	/** All .md files in Saved/Knowledge (written by the editor's Update Knowledge button), one section per file. */
 	FString LoadKnowledge()
@@ -198,16 +210,66 @@ private:
 };
 
 /**
- * Epic's real-time speech-to-face solver (StreamingADA, as used by MetaHuman's audio Live Link source).
- * Runs on its own thread, so solving never runs on the game thread. Frames is shared with the game
- * thread under Lock.
+ * Epic's real-time speech-to-face model (StreamingADA, as used by MetaHuman's audio Live Link source), run
+ * the same way as FSpeechAnimationSolverV4 but on the CPU and with one difference: when a step is already
+ * late, the model run is skipped while its audio still enters the model's 1 s input window, so the model
+ * keeps its context (a restart makes it blink at once). On the GPU backend NNE runs DirectML on the
+ * renderer's command queue, so each run waited behind the frames (up to 0.6 s under load, tested 2026-11-05).
+ * Runs on its own thread. Frames is shared with the game thread under Lock.
  */
 struct FLipSync
 {
-	FLipSync(UNNEModelData* Model, const FString& Backend)
-		: Solver(Model, Backend)
+	explicit FLipSync(UNNEModelData* Model)
+		: GuiNames(FSpeechAnimationSolverV4(Model, FString()).GetCurveNames())
 	{
 		Resampler.Init(Audio::EResamplingMethod::FastSinc, 16000.f / LiveSampleRate, 1);
+		AudioBuffer.SetNumZeroed(16000);
+		CurveValues.SetNumZeroed(81);
+		MoodState.SetNumZeroed(50 * 21);
+		BlinkBound.SetNumZeroed(3);
+		BlinkBound[2] = FMath::RandRange(3.0, 5.0) * 50; // first blink after 3 to 5 s, in 50 Hz steps
+		BlinkSel.SetNumZeroed(2);
+		Step.SetNumZeroed(1);
+		MoodInput.SetNumZeroed(21); // all zero = mood detected from the voice
+		LookaheadInput.Add(LookaheadMs / 20);
+
+		using namespace UE::NNE;
+		const TWeakInterfacePtr<INNERuntimeCPU> Runtime = GetRuntime<INNERuntimeCPU>(TEXT("NNERuntimeORTCpu"));
+		const TSharedPtr<IModelCPU> CPUModel = Runtime.IsValid() ? Runtime->CreateModelCPU(Model) : nullptr;
+		ModelInstance = CPUModel ? CPUModel->CreateModelInstanceCPU() : nullptr;
+		if (ModelInstance && ModelInstance->SetInputTensorShapes({ FTensorShape::Make({ 1, 16000 }), FTensorShape::Make({ 1, 81 }),
+				FTensorShape::Make({ 1, 21 }), FTensorShape::Make({ 1, 50, 21 }), FTensorShape::Make({ 3 }), FTensorShape::Make({ 2 }),
+				FTensorShape::Make({ 1 }), FTensorShape::Make({ 1 }) }) != EResultStatus::Ok)
+		{
+			ModelInstance.Reset();
+		}
+	}
+
+	bool IsValid() const
+	{
+		return ModelInstance.IsValid();
+	}
+
+	// One model step: the newest 20 ms are already in AudioBuffer; updates CurveValues and the model state.
+	bool RunModel()
+	{
+		using namespace UE::NNE;
+		const TArray<FTensorBindingCPU> Inputs = {
+			{ AudioBuffer.GetData(), uint64(AudioBuffer.Num() * sizeof(float)) },
+			{ CurveValues.GetData(), uint64(CurveValues.Num() * sizeof(float)) },
+			{ MoodInput.GetData(), uint64(MoodInput.Num() * sizeof(float)) },
+			{ MoodState.GetData(), uint64(MoodState.Num() * sizeof(float)) },
+			{ BlinkBound.GetData(), uint64(BlinkBound.Num() * sizeof(int64)) },
+			{ BlinkSel.GetData(), uint64(BlinkSel.Num() * sizeof(int64)) },
+			{ LookaheadInput.GetData(), uint64(LookaheadInput.Num() * sizeof(int64)) },
+			{ Step.GetData(), uint64(Step.Num() * sizeof(int64)) } };
+		const TArray<FTensorBindingCPU> Outputs = {
+			{ CurveValues.GetData(), uint64(CurveValues.Num() * sizeof(float)) },
+			{ MoodState.GetData(), uint64(MoodState.Num() * sizeof(float)) },
+			{ BlinkBound.GetData(), uint64(BlinkBound.Num() * sizeof(int64)) },
+			{ BlinkSel.GetData(), uint64(BlinkSel.Num() * sizeof(int64)) },
+			{ Step.GetData(), uint64(Step.Num() * sizeof(int64)) } };
+		return ModelInstance->RunSync(Inputs, Outputs) == EResultStatus::Ok;
 	}
 
 	~FLipSync()
@@ -241,7 +303,7 @@ struct FLipSync
 		}
 		if (SolveCount > 0)
 		{
-			UE_LOG(LogMRLabLive, Log, TEXT("Lip sync: %d frames solved, %.1f ms on average, %.1f ms at most, %d skipped because late"),
+			UE_LOG(LogMRLabLive, Log, TEXT("Lip sync: %d model runs, %.1f ms on average, %.1f ms at most, %d steps skipped because late"),
 				SolveCount, SolveSeconds / SolveCount * 1000.0, SolveMaxSeconds * 1000.0, SkipCount);
 		}
 	}
@@ -265,14 +327,16 @@ struct FLipSync
 		int32 Used = 0;
 		while (Pending.Num() - Used >= 320)
 		{
-			FSpeechAnimationAudioFrame In;
-			In.AudioSamples = TArray<float>(Pending.GetData() + Used, 320);
+			// Slide the model's 1 s input window by 20 ms.
+			const float* NewAudio = Pending.GetData() + Used;
+			FMemory::Memmove(AudioBuffer.GetData(), AudioBuffer.GetData() + 320, (16000 - 320) * sizeof(float));
+			FMemory::Memcpy(AudioBuffer.GetData() + 16000 - 320, NewAudio, 320 * sizeof(float));
 
 			// Voice in the window from 40 ms before to the lookahead after the moment this step animates.
 			float SumSquares = 0.f;
-			for (const float Sample : In.AudioSamples)
+			for (int32 Index = 0; Index < 320; ++Index)
 			{
-				SumSquares += Sample * Sample;
+				SumSquares += NewAudio[Index] * NewAudio[Index];
 			}
 			StepVoiced.Add(FMath::Sqrt(SumSquares / 320.f) > VoiceRms);
 			if (StepVoiced.Num() > LookaheadMs / 20 + 3)
@@ -287,26 +351,15 @@ struct FLipSync
 			const int64 Sample = (Solved + 320) * LiveSampleRate / 16000 - int64(LookaheadMs) * LiveSampleRate / 1000;
 			Used += 320;
 			Solved += 320;
-			if (Sample < Playhead - LiveSampleRate / 5)
+			if (Sample < Playhead)
 			{
-				// Heard more than 0.2 s ago: the solver is far behind (busy GPU). Skip to catch up; the next solve restarts
-				// its context. (Being a few ms late is normal: the mixer reads the voice a little ahead of what is audible.)
-				bContiguous = false;
+				// Already playing: skip the model run to catch up. The audio is in the window, so no context is lost.
 				++SkipCount;
 				continue;
 			}
 
-			In.SamplesCount = 320;
-			In.SampleRate = 16000;
-			In.NumChannels = 1;
-			In.bContiguous = bContiguous;
-			In.Mood = EAudioDrivenAnimationMood::AutoDetect;
-			In.Lookahead = LookaheadMs;
-			bContiguous = true;
-
-			FSpeechAnimationFrameData Out;
 			const double SolveStart = FPlatformTime::Seconds();
-			const bool bSolved = Solver.SolveAudioFrame(In, Out);
+			const bool bSolved = RunModel();
 			const double SolveTime = FPlatformTime::Seconds() - SolveStart;
 			SolveSeconds += SolveTime;
 			SolveMaxSeconds = FMath::Max(SolveMaxSeconds, SolveTime);
@@ -316,9 +369,9 @@ struct FLipSync
 				continue;
 			}
 			TMap<FString, float> Gui;
-			for (int32 Index = 0; Index < Out.CurveNames.Num(); ++Index)
+			for (int32 Index = 0; Index < GuiNames.Num(); ++Index)
 			{
-				Gui.Add(Out.CurveNames[Index].ToString(), Out.CurveValues[Index]);
+				Gui.Add(GuiNames[Index].ToString(), CurveValues[Index]);
 			}
 			const TMap<FString, float> Raw = GuiToRawControlsUtils::ConvertGuiToRawControls(Gui);
 
@@ -347,12 +400,22 @@ struct FLipSync
 		Pending.RemoveAt(0, Used);
 	}
 
-	FSpeechAnimationSolverV4 Solver;
+	// Model and its inputs/state, as in FSpeechAnimationSolverV4.
+	const TArray<FName> GuiNames;  // the model's 81 output controls
+	TSharedPtr<UE::NNE::IModelInstanceCPU> ModelInstance;
+	TArray<float> AudioBuffer;     // the last 1 s of voice, 16 kHz
+	TArray<float> CurveValues;
+	TArray<float> MoodState;
+	TArray<int64> BlinkBound;
+	TArray<int64> BlinkSel;
+	TArray<int64> Step;
+	TArray<float> MoodInput;
+	TArray<int64> LookaheadInput;
+
 	Audio::FResampler Resampler;
-	TArray<float> Pending;     // 16 kHz samples not solved yet
-	int64 Solved = 0;          // 16 kHz samples solved so far
-	bool bContiguous = false;  // false resets the solver on the first frame
-	TArray<bool> StepVoiced;   // voice in the latest 20 ms steps
+	TArray<float> Pending;     // 16 kHz samples not stepped yet
+	int64 Solved = 0;          // 16 kHz samples stepped so far
+	TArray<bool> StepVoiced;  // voice in the latest 20 ms steps
 	float MouthWeight = 0.f;   // 0 closes the mouth, 1 leaves the solver's mouth as it is
 	TArray<bool> IsMouth;      // per control in Names
 	std::atomic<int64> Playhead = 0; // voice sample being played, set by the game thread
@@ -400,7 +463,10 @@ void UMRLabLiveSession::StartSession()
 	}
 
 	const FString Knowledge = LoadKnowledge();
-	const FString FullInstructions = Knowledge.IsEmpty() ? Instructions : Instructions + TEXT("\n\nLab knowledge:") + Knowledge;
+	// The session runs without a delegation backend: everything comes from the instructions and the lab knowledge.
+	// Wording for gpt-live-1 from OpenAI's GPT-Live prompting guide.
+	const FString FullInstructions = Instructions + TEXT("\n\n") + NoDelegationRule
+		+ (Knowledge.IsEmpty() ? FString() : TEXT("\n\nLab knowledge:") + Knowledge);
 
 	Socket = MakeShared<FLiveSocket>();
 	TWeakObjectPtr<UMRLabLiveSession> WeakThis(this);
@@ -507,6 +573,20 @@ void UMRLabLiveSession::HandleMessage(const FString& Message)
 	{
 		UE_LOG(LogMRLabLive, Log, TEXT("Session closed: %s"), *Message.Left(500));
 		Shutdown(Event->GetStringField(TEXT("reason")));
+	}
+	else if (Type == TEXT("session.delegation.created"))
+	{
+		// No backend: answer the delegation at once so the model continues from its own instructions and knowledge.
+		const TSharedPtr<FJsonObject>* Delegation = nullptr;
+		if (Event->TryGetObjectField(TEXT("delegation"), Delegation))
+		{
+			UE_LOG(LogMRLabLive, Warning, TEXT("The model delegated (%s); answered that nothing can be looked up"), *Message.Left(300));
+			TSharedRef<FJsonObject> Reply = MakeShared<FJsonObject>();
+			Reply->SetStringField(TEXT("type"), TEXT("session.commentary.append"));
+			Reply->SetStringField(TEXT("delegation_id"), (*Delegation)->GetStringField(TEXT("id")));
+			Reply->SetStringField(TEXT("content"), DelegationReply);
+			Send(Reply);
+		}
 	}
 	else if (Type == TEXT("error"))
 	{
@@ -619,13 +699,9 @@ void UMRLabLiveSession::StartAudio()
 	LipSyncModel = SolverModel;
 	if (SolverModel)
 	{
-		// Epic's own backend switch for this solver (GPU NNERuntimeORTDml by default, or NNERuntimeORTCpu).
-		const IConsoleVariable* BackendVar = IConsoleManager::Get().FindConsoleVariable(TEXT("mh.RealtimeAudio.Backend"));
-		const FString Backend = BackendVar ? BackendVar->GetString() : TEXT("NNERuntimeORTDml");
-		UE_LOG(LogMRLabLive, Log, TEXT("Lip sync backend: %s"), *Backend);
-		LipSync = MakeShared<FLipSync>(SolverModel, Backend);
+		LipSync = MakeShared<FLipSync>(SolverModel);
 	}
-	if (!LipSync.IsValid() || !LipSync->Solver.Initialize())
+	if (!LipSync.IsValid() || !LipSync->IsValid())
 	{
 		UE_LOG(LogMRLabLive, Error, TEXT("Lip sync solver could not start; the agent speaks without lip sync"));
 		LipSync.Reset();
