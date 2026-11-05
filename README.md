@@ -30,7 +30,7 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 | G3b | Robust to dataset changes | The dataset lives in its own GitLab repo and changes over time. The agent framework must stay solid when it changes, for example through an "update dataset" function. |
 | G4 | Gaze | Use the Moverse tracking system so the agent follows the user with its gaze. |
 | G5 | Vision | Use the frontal camera on top of the wall (the owner listed it under the Moverse system) so the agent can "see" the user and answer questions such as "what color is my shirt" or "in which pose am I now". |
-| G6 | Natural behaviour (LAST step) | Natural lip sync and natural movements: movements while talking, body language adapted to what it says, facial microexpressions. The owner expects MetaHuman to give a high degree of realism. This is the last step, after the rest of the framework is up and working. Lip sync work was started earlier (see 4.5). |
+| G6 | Natural behaviour (LAST step) | Natural lip sync and natural movements: movements while talking, body language adapted to what it says, facial microexpressions. The owner expects MetaHuman to give a high degree of realism. Lip sync was moved ahead (Step 7, D40, 4.11); the natural movements stay the last step (Step 9). |
 | G7 | Stereo 3D | The LED wall shows 3D through polarization. Its settings must work in the 5.8 project. |
 
 ## 2. Working agreements
@@ -144,8 +144,9 @@ Details of `NDC_Basic`:
 
 ### 4.5 Agent (`/Game/MetaHumans/Agent/BP_Agent`)
 - MetaHuman character asset `/Game/MetaHumans/Agent`, with body, face, grooms and clothing under `/Game/MetaHumans/Agent/`.
-- Components include `ACEAudioCurveSourceComponent` (NVIDIA ACE Audio2Face), `MetaHumanComponentUE`, grooms, LODSync.
-- Event graph: BeginPlay enables input for player controller 0. OnAnimInitialized (Face, Body) runs the standard MetaHuman `LiveLinkSetup`. A keyboard event `T` exists; when read as text it showed no attached nodes (not confirmed in the Blueprint editor).
+- Components include `MetaHumanComponentUE`, grooms, LODSync. An `ACEAudioCurveSourceComponent` (NVIDIA ACE Audio2Face) sits only on the agent placed in `DefaultMap`, not in the class; it is unused (D43).
+- Event graph: BeginPlay enables input for player controller 0. OnAnimInitialized (Face, Body) runs the standard MetaHuman `LiveLinkSetup`. A keyboard event `T` sits next to unconnected ACE test nodes from the 5.7 project (`AnimateCharacterFromWavFileAsync` with a desktop WAV path); unused.
+- Lip sync (4.11): function `UpdateLipSync`, called from Event Tick after `UpdateGaze`.
 - Test audio: `/Game/Audio/test_audio`.
 - Component `LiveSession` (`MRLabLiveSession`, 4.8). BeginPlay (after EnableInput) calls `StartSession`. `OnUserTranscript` and `OnAgentTranscript` go to PrintString with keys `User` / `Agent`, so each side shows one growing line on screen (hidden in nDisplay nodes by `DisableAllScreenMessages`) and in the log.
 - Gaze (4.10): functions `InitGaze` (called after `StartSession` at BeginPlay) and `UpdateGaze` (called from Event Tick); variables `NDC`, `HeadTarget`, `EyeTarget`.
@@ -169,7 +170,7 @@ Described in each machine's local `CLAUDE.md`: UE's built-in MCP server (`.mcp.j
 - API key: one line in `Saved/OpenAIKey.txt` on each machine (D26). `Saved/` is ignored by Git, but it is included when the whole project folder is zipped. Without the file the component logs an error and does nothing.
 - Live API, as used (verified on 2026-10-27 against the API): WebSocket `wss://api.openai.com/v1/live/sessions`, header `Authorization: Bearer <key>`, first message `session.start` with `model`, `instructions`, `audio.format` (`audio/pcm`, 24000) and `audio.output.voice`; no `delegation`, so the session runs in client delegation mode. Mic audio goes up as `session.input_audio.append` (base64 PCM16 mono 24 kHz, sent every frame); the voice comes back as `session.output_audio.delta`, a continuous real-time stream in 100 ms chunks (silence included); the model decides itself when to speak and handles interruptions. Transcripts: `session.input_transcript.delta`, `session.output_transcript.delta`. Sessions expire 2 hours after start (`expires_at`); the component only logs the close, it does not restart (Q25). Price: $0.05 per session minute.
 - The handshake is refused (403) when the request carries an `Origin` header. Unreal's own WebSocket client (libwebsockets on Windows) always sends one, so the plugin uses the Windows WinHttp WebSocket API instead (D29).
-- Microphone: default Windows recording device through `AudioCapture`, mixed to mono and resampled to 24 kHz. No echo cancellation: the agent may hear itself through open speakers (Q24). Voice: a procedural sound wave on an audio component attached to the agent (2D, no attenuation).
+- Microphone: default Windows recording device through `AudioCapture`, mixed to mono and resampled to 24 kHz. No echo cancellation: the agent may hear itself through open speakers (Q24). Voice: a procedural sound wave on an audio component attached to the agent (2D, no attenuation), held back by 0.12 s for lip sync (4.11).
 - Tested on the laptop (2026-10-27), with a spoken question played through the laptop speakers into the laptop microphone: in Play-In-Editor and in an nDisplay node (`NDC_Basic` / `Node_0`, `-game`), the session starts, the question is transcribed correctly and the agent answers (transcripts in the logs). Closing the node ends it cleanly. The agent's answer did not come back as user speech in these short tests. Also checked: the editor loads the plugin from the committed DLL with the project's own `Binaries` folder removed, as on the lab PC.
 
 ### 4.9 Lab knowledge
@@ -189,9 +190,17 @@ Described in each machine's local `CLAUDE.md`: UE's built-in MCP server (`.mcp.j
 - Tested on the laptop (2026-11-05) with fake Moverse data (head moving 2 m to each side and 0.8 m forward/back, 4 to 5 m from the agent): eye direction within 0.4 to 3.2 degrees of the user's head; head turning about two thirds of the angle with a small lag; after the data stops, `bHeadTracked` turns false and head and eyes are back to straight ahead (0 degrees) within about 3 s. Screenshots from the user's line of sight show the face turned to the viewer when tracked and turned away when not (not in Git). The conversation session still starts.
 - Not tested: real Moverse, the wall, the nDisplay node (its config file had to be regenerated by nDisplay Launch, which was not used), how natural it looks to a person. Known limits: the head-bone-to-eye offset of the user (Q23) is not applied (about 1 to 1.5 degrees at 3 to 5 m); both eyes get the same rotation (no convergence); the face is dark under the current lighting (Q22).
 
+### 4.11 Lip sync
+- Method (D41, D42): Epic's real-time speech-to-face solver from UE 5.8 (`FSpeechAnimationSolverV4`, module `SpeechAnimationSolver` in the hidden engine plugin `StreamingADA`, enabled through `MetaHumanCoreTech`; the same model as MetaHuman's audio Live Link source). Lookahead 80 ms, mood auto-detected from the voice. Output: the 251 MetaHuman face controls (`CTRL_expressions_*`): jaw, lips, tongue, cheeks, brows, blinks (D42). No head motion.
+- Code (`MRLabLive`, 4.8): every voice chunk from the Live API is queued into the voice wave and handed to a solver thread (`FLipSync`): resampled to 16 kHz, solved every 20 ms on the GPU (NNE DirectML), each frame tagged with the voice sample it belongs to (newest sample minus the lookahead). Each tick the component takes the frame for the sample now playing (queued samples minus those still waiting in the wave), interpolates, and exposes it as `LipSyncCurves` (Blueprint read-only map).
+- Voice delay: 0.12 s of silence (lookahead + 40 ms margin) is put in front of the voice at the start of a stream and whenever the voice wave runs dry, so each frame is solved before its sound plays.
+- Face: `BP_Agent.UpdateLipSync` copies `LiveSession.LipSyncCurves` into the variable `LipSyncCurves` of `ABP_Agent_Face_PostProcess`; there a `Modify Curve` node (Blend, alpha 1, `Curve Map` pin) sets them right before the eye-look `Modify Curve` (4.10), so gaze still controls eye direction (the solver's eye-look values are 0 and get overwritten). The face post-process now updates on the game thread (`Use Multi Threaded Animation Update` off): with it on, the map was read by a worker thread while the Blueprint replaced it, which froze the game for seconds and once crashed the editor (`Corrupt source map`).
+- Measured on the laptop (2026-11-05, Play, recorded question through the speakers): solver 6.5 ms per 20 ms frame on average (28 ms at most; the CPU backend needed 16 ms); 58 fps with no hitches while the agent speaks; jaw leads the voice by 0.04 s (cross-correlation of the recorded engine output and the captured jaw control), the same lead as the offline result. Starting a session costs one hitch of about 2.4 s (model load, before anyone speaks). At rest the model keeps the jaw slightly open (jaw control about 0.13), as in its offline output.
+- Comparison before the choice (D41): the same recorded Frank answer animated by Epic's model (lookahead 0.08 s and 0.24 s) and by NVIDIA ACE Audio2Face 3.0 (Mark), rendered with the same camera; videos sent to the owner (not in Git). ACE facts found on UE 5.8: its sound-asset input passed pure silence to the model (the WAV-file input works); its component crashed the editor once after an animation ended (`Cast of nullptr to BetterSoundWaveProcedural` in `UACEAudioCurveSourceComponent::TickComponent`); 1.2 to 1.7 s from sending audio to the voice starting (model loaded), plus about 11 s on first use; 52 ARKit shapes mapped to the face, no tongue.
+
 ## 5. Roadmap
 
-Generic steps. A precise plan is written and agreed before each step starts (section 2). The order of Steps 3 to 7 is not decided. Step 8 is fixed as the last step.
+Generic steps. A precise plan is written and agreed before each step starts (section 2). Step 9 is fixed as the last step. On 2026-11-05 lip sync was moved ahead of vision and split from the natural movements (D40).
 
 ### Step 1. Editor connection and version control: DONE
 - Result: Claude Code operates the editor through MCP, Python remote execution and files. The project is in Git with LFS on GitHub.
@@ -220,16 +229,20 @@ Generic steps. A precise plan is written and agreed before each step starts (sec
 - Result: eyes aim at the head-tracked user, head and neck turn part of the way, back to straight ahead when nobody is tracked (4.10, D34 to D37).
 - Remaining: test on the wall with real tracking; Q26; eye offset (Q23).
 
-### Step 7. Vision: TODO
+### Step 7. Lip sync: DONE on the laptop (2026-11-05), lab PC test pending
+- Goal: natural lip sync from the agent's live voice (part of G6), lip sync only.
+- Result: Epic's real-time speech-to-face solver in `MRLabLive`, driving the agent's face controls in sync with the voice (4.11, D40 to D43).
+- Remaining: lab PC (GPU load next to the stereo rendering; same engine plugins); a real conversation with a person, including interrupting the agent (not tested); how natural it looks to visitors.
+
+### Step 8. Vision: TODO
 - Goal: the agent can see the user through the frontal camera on top of the wall and answer questions about appearance and pose (G5).
 - Known inputs: none beyond the owner's description.
 - Open: Q16, Q17.
 - Detailed plan: not written yet.
 
-### Step 8. Lip sync and natural behaviour (LAST): TODO
-- Goal: natural lip sync, movements while talking, body language matching the content, facial microexpressions (G6).
-- Known inputs: NVIDIA ACE Audio2Face plugins enabled, `ACEAudioCurveSourceComponent` on `BP_Agent`, `test_audio`, MetaHuman character (4.5).
-- Open: Q18.
+### Step 9. Natural behaviour (LAST): TODO
+- Goal: movements while talking, body language matching the content, facial microexpressions (G6).
+- Known inputs: MetaHuman character (4.5); lip sync (4.11) already moves the face while speaking.
 - Detailed plan: not written yet.
 
 ## 6. Open questions and TODO
@@ -267,7 +280,7 @@ Tracking and vision:
 - **Q17.** Pose questions: answer from camera images, from Moverse skeleton data, or both?
 
 Behaviour:
-- **Q18.** Lip sync and animation approach for Step 8 (ACE Audio2Face, MetaHuman features, other). Decide when Step 8 starts.
+- **Q18.** ANSWERED 2026-11-05: lip sync with Epic's MetaHuman real-time audio solver, after a video comparison with NVIDIA Audio2Face (D41, D43).
 
 Process:
 - **Q19.** The lab PC can pull from GitHub but cannot push. How do changes made on the lab PC (assets, config, README updates) get back into the repo? Done once on 2026-10-27: the owner zipped the lab project and the laptop merged it (section 8).
@@ -315,10 +328,23 @@ Process:
 | D37 | 2026-11-05 | Gaze implemented in agent-specific copies of the MetaHuman post-process AnimBPs (`Common` assets untouched) plus a `bHeadTracked` flag in `NDC_Basic` based on the Live Link subject state. | Claude |
 | D38 | 2026-11-05 | Agent persona: Frank, 57, lifelong TU Wien technician, now the LED wall technician of the new MR Lab; funny, sarcastic, a bit grumpy, a know-it-all, but pleasant to talk to. | Owner |
 | D39 | 2026-11-05 | Agent voice `ash`. | Owner |
+| D40 | 2026-11-05 | Lip sync now (Step 7), vision later (Step 8); lip sync only, the other natural movements stay the last step (Step 9). Changes D3. | Owner |
+| D41 | 2026-11-05 | Compare Epic's MetaHuman audio solver and NVIDIA Audio2Face on the same recorded answer before choosing; then Epic's MetaHuman audio chosen (answers Q18). | Owner |
+| D42 | 2026-11-05 | Lip sync moves the whole speech face (jaw, lips, tongue, cheeks, brows, blinks), not only the mouth; eye direction stays with the gaze. | Owner |
+| D43 | 2026-11-05 | Implementation: solver inside `MRLabLive` on its own thread, GPU backend, lookahead 80 ms, voice delayed 0.12 s, curves into the agent's face post-process through a `Modify Curve` curve map, that AnimBP updated on the game thread. The unused ACE components and test nodes are left as they are. | Claude |
 
 ## 8. Work log
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
+
+### 2026-11-05 (Claude Code, laptop): Step 7, lip sync
+Done:
+- Owner moved lip sync ahead of vision and asked for a comparison first (D40 to D42). Recorded a Frank answer, animated it with Epic's real-time solver (Performance asset, lookahead 80 and 240 ms) and with NVIDIA Audio2Face in Play, rendered three videos with the same camera and sent them; owner chose Epic (D41, Q18). Test content in `/Game/_Sandbox/LipSync` and `Saved/LipSyncTest` (not in Git).
+- `MRLabLive`: lip sync solver thread, delayed voice, `LipSyncCurves` (4.8, 4.11); DLL rebuilt. `ABP_Agent_Face_PostProcess`: `LipSyncCurves` variable, curve-map `Modify Curve` before the eye curves, game-thread update. `BP_Agent`: `UpdateLipSync`.
+- Found and fixed: seconds-long freezes and one crash from the curve map being replaced while a worker thread read it (4.11).
+Verified on the laptop: see 4.11 (Play with a recorded question: lip sync running, timing, frame rate); gaze curves still applied with fake Moverse data; a live video of the agent answering was rendered from the captured face controls and voice and sent to the owner.
+Not verified: interrupting the agent while it speaks; a real conversation; the nDisplay node; the lab PC.
+Left: lab PC tests of Steps 4 to 7; Q19 to Q26 and earlier open items unchanged.
 
 ### 2026-11-05 (Claude Code, laptop): agent persona and voice
 Done:
