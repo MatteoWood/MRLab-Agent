@@ -48,11 +48,11 @@ namespace
 	// in the instructions, and any delegation that still happens is answered at once (see HandleMessage).
 	const TCHAR* NoDelegationRule = TEXT(
 		"Delegation policy: there is no backend and there are no tools. NEVER GENERATE <|SpawnThinking|>, "
-		"CHECK, SEARCH, LOOK UP OR USE TOOLS. Answer right away, only from the lab knowledge below and the conversation. "
-		"If the lab knowledge does not contain the answer, say that you do not know. Never promise to look something up.");
+		"CHECK, SEARCH, LOOK UP OR USE TOOLS. Answer right away from what you know. Facts about the lab come only from "
+		"the lab knowledge below; if it does not contain them, say that you do not know. Never promise to look something up.");
 	const TCHAR* DelegationReply = TEXT(
-		"Nothing can be looked up here, there is no backend. Answer now, only from the lab knowledge in your instructions. "
-		"If the answer is not in it, say that you do not know.");
+		"Nothing can be looked up here, there is no backend. Answer now from what you know: lab facts only from the lab "
+		"knowledge in your instructions; if a lab fact is not there, say that you do not know.");
 
 	/** All .md files in Saved/Knowledge (written by the editor's Update Knowledge button), one section per file. */
 	FString LoadKnowledge()
