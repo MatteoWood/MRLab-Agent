@@ -36,6 +36,11 @@ namespace
 	constexpr int32 LookaheadMs = 80;
 	// The voice is held back by the lookahead plus a margin for solving, so each frame is ready before its sound plays.
 	constexpr int32 VoiceDelaySamples = (LookaheadMs + 40) * LiveSampleRate / 1000;
+	// Mouth closing in silence: the Live API sends exact zeros between answers. A 20 ms step counts as voice above
+	// this RMS level; the mouth controls fade in within about 60 ms before speech and out over about 200 ms after it.
+	constexpr float VoiceRms = 0.003f;
+	constexpr float MouthOpenPerStep = 0.35f;
+	constexpr float MouthClosePerStep = 0.1f;
 
 	/** All .md files in Saved/Knowledge (written by the editor's Update Knowledge button), one section per file. */
 	FString LoadKnowledge()
@@ -199,9 +204,8 @@ private:
  */
 struct FLipSync
 {
-	explicit FLipSync(UNNEModelData* Model)
-		// GPU (DirectML), Epic's default: about 6 ms per 20 ms frame on the laptop; the CPU backend needed about 16 ms.
-		: Solver(Model, TEXT("NNERuntimeORTDml"))
+	FLipSync(UNNEModelData* Model, const FString& Backend)
+		: Solver(Model, Backend)
 	{
 		Resampler.Init(Audio::EResamplingMethod::FastSinc, 16000.f / LiveSampleRate, 1);
 	}
@@ -237,8 +241,8 @@ struct FLipSync
 		}
 		if (SolveCount > 0)
 		{
-			UE_LOG(LogMRLabLive, Log, TEXT("Lip sync: %d frames solved, %.1f ms on average, %.1f ms at most"),
-				SolveCount, SolveSeconds / SolveCount * 1000.0, SolveMaxSeconds * 1000.0);
+			UE_LOG(LogMRLabLive, Log, TEXT("Lip sync: %d frames solved, %.1f ms on average, %.1f ms at most, %d skipped because late"),
+				SolveCount, SolveSeconds / SolveCount * 1000.0, SolveMaxSeconds * 1000.0, SkipCount);
 		}
 	}
 
@@ -263,6 +267,35 @@ struct FLipSync
 		{
 			FSpeechAnimationAudioFrame In;
 			In.AudioSamples = TArray<float>(Pending.GetData() + Used, 320);
+
+			// Voice in the window from 40 ms before to the lookahead after the moment this step animates.
+			float SumSquares = 0.f;
+			for (const float Sample : In.AudioSamples)
+			{
+				SumSquares += Sample * Sample;
+			}
+			StepVoiced.Add(FMath::Sqrt(SumSquares / 320.f) > VoiceRms);
+			if (StepVoiced.Num() > LookaheadMs / 20 + 3)
+			{
+				StepVoiced.RemoveAt(0);
+			}
+			MouthWeight = StepVoiced.Contains(true)
+				? FMath::Min(1.f, MouthWeight + MouthOpenPerStep)
+				: FMath::Max(0.f, MouthWeight - MouthClosePerStep);
+
+			// The solver animates the moment one lookahead before the newest audio it has seen.
+			const int64 Sample = (Solved + 320) * LiveSampleRate / 16000 - int64(LookaheadMs) * LiveSampleRate / 1000;
+			Used += 320;
+			Solved += 320;
+			if (Sample < Playhead - LiveSampleRate / 5)
+			{
+				// Heard more than 0.2 s ago: the solver is far behind (busy GPU). Skip to catch up; the next solve restarts
+				// its context. (Being a few ms late is normal: the mixer reads the voice a little ahead of what is audible.)
+				bContiguous = false;
+				++SkipCount;
+				continue;
+			}
+
 			In.SamplesCount = 320;
 			In.SampleRate = 16000;
 			In.NumChannels = 1;
@@ -270,8 +303,6 @@ struct FLipSync
 			In.Mood = EAudioDrivenAnimationMood::AutoDetect;
 			In.Lookahead = LookaheadMs;
 			bContiguous = true;
-			Used += 320;
-			Solved += 320;
 
 			FSpeechAnimationFrameData Out;
 			const double SolveStart = FPlatformTime::Seconds();
@@ -297,15 +328,20 @@ struct FLipSync
 				for (const TPair<FString, float>& Pair : Raw)
 				{
 					Names.Add(FName(Pair.Key));
+					bool bMouth = false;
+					for (const TCHAR* Prefix : { TEXT("CTRL_expressions_jaw"), TEXT("CTRL_expressions_mouth"), TEXT("CTRL_expressions_tongue"), TEXT("CTRL_expressions_teeth") })
+					{
+						bMouth |= Pair.Key.StartsWith(Prefix);
+					}
+					IsMouth.Add(bMouth);
 				}
 			}
 			TArray<float> Values;
-			for (const FName& Name : Names)
+			for (int32 Index = 0; Index < Names.Num(); ++Index)
 			{
-				Values.Add(Raw.FindRef(Name.ToString()));
+				// Mouth controls at 0 give the MetaHuman's closed neutral mouth.
+				Values.Add(Raw.FindRef(Names[Index].ToString()) * (IsMouth[Index] ? MouthWeight : 1.f));
 			}
-			// The solver animates the moment one lookahead before the newest audio it has seen.
-			const int64 Sample = Solved * LiveSampleRate / 16000 - int64(LookaheadMs) * LiveSampleRate / 1000;
 			Frames.Emplace(Sample, MoveTemp(Values));
 		}
 		Pending.RemoveAt(0, Used);
@@ -316,6 +352,11 @@ struct FLipSync
 	TArray<float> Pending;     // 16 kHz samples not solved yet
 	int64 Solved = 0;          // 16 kHz samples solved so far
 	bool bContiguous = false;  // false resets the solver on the first frame
+	TArray<bool> StepVoiced;   // voice in the latest 20 ms steps
+	float MouthWeight = 0.f;   // 0 closes the mouth, 1 leaves the solver's mouth as it is
+	TArray<bool> IsMouth;      // per control in Names
+	std::atomic<int64> Playhead = 0; // voice sample being played, set by the game thread
+	int32 SkipCount = 0;
 	int32 SolveCount = 0;
 	double SolveSeconds = 0.0;
 	double SolveMaxSeconds = 0.0;
@@ -509,6 +550,7 @@ void UMRLabLiveSession::UpdateLipSync()
 	}
 	// The voice sample being played now: everything queued minus what is still waiting in the wave.
 	const int64 Playhead = VoiceQueued - VoiceWave->GetAvailableAudioByteCount() / sizeof(int16);
+	LipSync->Playhead = Playhead;
 
 	FScopeLock ScopeLock(&LipSync->Lock);
 	TArray<TPair<int64, TArray<float>>>& Frames = LipSync->Frames;
@@ -577,7 +619,11 @@ void UMRLabLiveSession::StartAudio()
 	LipSyncModel = SolverModel;
 	if (SolverModel)
 	{
-		LipSync = MakeShared<FLipSync>(SolverModel);
+		// Epic's own backend switch for this solver (GPU NNERuntimeORTDml by default, or NNERuntimeORTCpu).
+		const IConsoleVariable* BackendVar = IConsoleManager::Get().FindConsoleVariable(TEXT("mh.RealtimeAudio.Backend"));
+		const FString Backend = BackendVar ? BackendVar->GetString() : TEXT("NNERuntimeORTDml");
+		UE_LOG(LogMRLabLive, Log, TEXT("Lip sync backend: %s"), *Backend);
+		LipSync = MakeShared<FLipSync>(SolverModel, Backend);
 	}
 	if (!LipSync.IsValid() || !LipSync->Solver.Initialize())
 	{
