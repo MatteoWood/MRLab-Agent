@@ -165,7 +165,7 @@ Described in each machine's local `CLAUDE.md`: UE's built-in MCP server (`.mcp.j
 ### 4.8 Conversation (`Plugins/MRLabLive`)
 - C++ project plugin, one Runtime module, Win64 only (D25). Source and the built `UnrealEditor-MRLabLive.dll` + `UnrealEditor.modules` are in Git (DLL via LFS, the `.pdb` is not), so the lab PC runs it without a compiler (D27). The DLL only loads in an engine with the same build ID (5.8.0 changelist 55116800 on both machines); after an engine update it must be rebuilt on the laptop and committed again.
 - Rebuild (editor closed): `Engine\Build\BatchFiles\Build.bat Development Win64 -Project=<uproject> -TargetType=Editor -NoEngineChanges`.
-- Component `UMRLabLiveSession` (`MRLabLive Session` in the Add Component list). Properties `Model` (`gpt-live-1`), `Voice` (`marin`), `Instructions` (English-only lab technician prompt adapted from the `realtime_rag` prototype, with the rule to answer lab questions only from the lab knowledge (4.9); edit it on `BP_Agent`). `StartSession` / `StopSession`; events `OnUserTranscript`, `OnAgentTranscript` (text of the current utterance so far), `OnSessionClosed` (reason). Log category `LogMRLabLive`; each finished utterance is logged as `User: ...` / `Agent: ...`.
+- Component `UMRLabLiveSession` (`MRLabLive Session` in the Add Component list). Properties `Model` (`gpt-live-1`), `Voice` (`marin`; the agent placed in `DefaultMap` overrides it with `ash`, D39), `Instructions` (set on `BP_Agent`, edit it there; the C++ default is the older plain technician prompt). Prompt on `BP_Agent` since 2026-11-05 (D38): persona Frank, 57, has worked at TU Wien all his life, now the technician of the new lab's LED wall who lives on the wall as a digital human; grumpy, sarcastic, funny, a know-it-all who always adds one more detail, but warm and never insulting; short spoken answers in English, at most one joke per answer; lab facts only from the lab knowledge (4.9), admitting gaps in character; no invented people, departments or dates from his past. `StartSession` / `StopSession`; events `OnUserTranscript`, `OnAgentTranscript` (text of the current utterance so far), `OnSessionClosed` (reason). Log category `LogMRLabLive`; each finished utterance is logged as `User: ...` / `Agent: ...`.
 - API key: one line in `Saved/OpenAIKey.txt` on each machine (D26). `Saved/` is ignored by Git, but it is included when the whole project folder is zipped. Without the file the component logs an error and does nothing.
 - Live API, as used (verified on 2026-10-27 against the API): WebSocket `wss://api.openai.com/v1/live/sessions`, header `Authorization: Bearer <key>`, first message `session.start` with `model`, `instructions`, `audio.format` (`audio/pcm`, 24000) and `audio.output.voice`; no `delegation`, so the session runs in client delegation mode. Mic audio goes up as `session.input_audio.append` (base64 PCM16 mono 24 kHz, sent every frame); the voice comes back as `session.output_audio.delta`, a continuous real-time stream in 100 ms chunks (silence included); the model decides itself when to speak and handles interruptions. Transcripts: `session.input_transcript.delta`, `session.output_transcript.delta`. Sessions expire 2 hours after start (`expires_at`); the component only logs the close, it does not restart (Q25). Price: $0.05 per session minute.
 - The handshake is refused (403) when the request carries an `Origin` header. Unreal's own WebSocket client (libwebsockets on Windows) always sends one, so the plugin uses the Windows WinHttp WebSocket API instead (D29).
@@ -313,10 +313,19 @@ Process:
 | D35 | 2026-11-05 | Gaze uses eyes and head: eyes aim at the user, head and neck turn part of the way, body unchanged. | Owner |
 | D36 | 2026-11-05 | When nobody is tracked the agent eases back to looking straight ahead. | Owner |
 | D37 | 2026-11-05 | Gaze implemented in agent-specific copies of the MetaHuman post-process AnimBPs (`Common` assets untouched) plus a `bHeadTracked` flag in `NDC_Basic` based on the Live Link subject state. | Claude |
+| D38 | 2026-11-05 | Agent persona: Frank, 57, lifelong TU Wien technician, now the LED wall technician of the new MR Lab; funny, sarcastic, a bit grumpy, a know-it-all, but pleasant to talk to. | Owner |
+| D39 | 2026-11-05 | Agent voice `ash`. | Owner |
 
 ## 8. Work log
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
+
+### 2026-11-05 (Claude Code, laptop): agent persona and voice
+Done:
+- Owner set the voice to `ash` on the agent placed in `DefaultMap` (D39) and described the persona Frank (D38). New `Instructions` prompt written for Frank and saved on `BP_Agent` (4.8); the placed agent picked it up and kept its `ash` voice.
+Verified on the laptop: in Play-In-Editor the session starts with the Frank prompt and voice `ash` (no error from the API; the log line is cut before the voice field).
+Not verified: how Frank sounds and behaves in a conversation (nobody spoke to him in this test); the lab PC.
+Left: unchanged from the previous entry.
 
 ### 2026-11-05 (Claude Code, laptop): Step 6, gaze following
 Done:
