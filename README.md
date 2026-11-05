@@ -41,6 +41,7 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 - Version control is this GitHub repo (public, Git LFS for binaries). GitLab was too small for the project. The knowledge base stays in its own GitLab repo.
 - AI tooling is Claude Code. Codex is no longer used.
 - The repo is public. Never write IP addresses, ports, hostnames or credentials of lab machines in tracked files (README, config, scripts, commit messages). Keep them in each machine's local `CLAUDE.md`.
+- `NDC_Basic` is locked (D54, details in 4.3): do not change any of its parameters, in the Blueprint or the placed actor, unless the owner asks for that specific change. A change can break the 3D effect on the wall.
 - `CLAUDE.md` (agent instructions) is machine-specific and ignored by Git. The laptop version includes committing and pushing to GitHub. The lab PC has no push credentials for GitHub, so its version has no GitHub steps. Both files exist only locally on their machine (laptop: `C:\Users\bosco\Documents\Unreal Projects\MRLabProject 5.8\CLAUDE.md`; lab PC: `CLAUDE.md` in its clone, created on 2026-10-21 from the former `CLAUDE.lab.md`, commit `8ea546d`).
 
 ## 3. Environment
@@ -80,42 +81,48 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 
 ## 4. Current state
 
-State on 2026-11-05: on the lab PC the wall runs head-tracked stereo 3D with live Moverse tracking (verified by the owner on 2026-10-21). On the laptop the agent holds a spoken English conversation through gpt-live-1 (4.8), answers lab questions from the GitLab knowledge base (4.9) and follows the tracked user with its eyes and head (4.10); none of these three is tested on the lab PC yet.
+State on 2026-11-05: the repo holds the last working lab PC version (owner's zip of the lab project, evening of 2026-11-05, section 8). On the lab PC the wall runs head-tracked stereo 3D with live Moverse tracking (verified by the owner on 2026-10-21, and again on 2026-11-05 with the new `NDC_Basic` output settings, D49). `NDC_Basic` is locked: do not change its settings (4.3, D54). On the laptop the agent holds a spoken English conversation through gpt-live-1 (4.8), answers lab questions from the GitLab knowledge base (4.9) and follows the tracked user with its eyes and head (4.10); none of these three is tested on the lab PC yet. Since 2026-11-05 (lab PC) the virtual room is lit by real lights on its ceiling LED strips plus a fill light, with one post-process volume for the wall (4.7); not yet checked on the wall.
 
 ### 4.1 Project setup
 - No project `Source/` folder. C++ lives in the project plugin `Plugins/MRLabLive` (4.8, D25). Building it also makes the build tool generate a stub project module and `Binaries/Win64/MRLabProject58Editor.target`; both are ignored by Git and not needed to run.
 - Main level: `/Game/DefaultMap` (World Partition).
 - Plugins enabled in `MRLabProject58.uproject`: MetaHuman set (MetaHuman, MetaHumanCalibrationProcessing, MetaHumanCoreTech, MetaHumanLiveLink, MetaHumanCharacter), MovieRenderPipeline, NVIDIA ACE (NV_ACE_Reference, NvAudio2FaceClaire, NvAudio2FaceJames, NvAudio2FaceMark), nDisplay, DisplayClusterLaunch, Switchboard, ModelingToolsEditorMode, editor AI tooling (ModelContextProtocol, EditorToolset, Terminal, ConfigSettingsToolset, SlateInspectorToolset, LiveCodingToolset), `MoversePlugin` marked `"Optional": true` (D10), and the project plugin `MRLabLive` (4.8).
 - Optional plugins in UE 5.8: in a Blueprint-only project on the Launcher engine, an optional plugin is only loaded if it is in the engine's build receipt (`Engine/Binaries/Win64/UnrealEditor.target`) or passed on the command line. So `MoversePlugin` is skipped silently even when installed, unless the process starts with `-EnablePlugins=MoversePlugin` (D16, Q20).
-- Config: `DefaultEngine.ini` enables Python remote execution (`bRemoteExecution=True`). `DefaultGame.ini` holds the Live Link settings copied from the lab project. `DefaultDisplayClusterLaunch.ini` (new, lab PC) holds the nDisplay Launch arguments, including `EnablePlugins=MoversePlugin`. `Config/nDisplay/StereoCheckerboardRemap.obj` (new, lab PC) is the nDisplay output remap mesh for the 3D output (4.3).
+- Config: `DefaultEngine.ini` enables Python remote execution (`bRemoteExecution=True`) and, since 2026-11-05 (lab PC), sets `[SystemSettings]` `r.ScreenPercentage=100` and `r.ViewTextureMipBias.Offset=0` (4.7). `DefaultGame.ini` holds the Live Link settings copied from the lab project. `DefaultDisplayClusterLaunch.ini` (new, lab PC) holds the nDisplay Launch arguments, including `EnablePlugins=MoversePlugin`. `Config/nDisplay/StereoCheckerboardRemap.obj` (new, lab PC) is the nDisplay output remap mesh for the 3D output (4.3).
 
 ### 4.2 Level contents (`DefaultMap`)
 
 | Actor | Class | Notes |
 |---|---|---|
-| `MRLab` | StaticMeshActor | Lab room model, the virtual extension of the real lab behind the wall. Inside: y -270..270, z 0..319, back wall at x=-638, open at the front (x=50). Its emissive materials `M_LightsCold` and `M_LightsWarm` are the only light sources of the scene. |
+| `MRLab` | StaticMeshActor | Lab room model, the virtual extension of the real lab behind the wall. Inside: y -270..270, z 0..319, back wall at x=-638, open at the front (x=50). Its emissive materials `M_LightsCold` and `M_LightsWarm` are 9 thin LED strips across the ceiling (x = -96, -156, ... -576, every 60 cm, y -261..261, z 319..320, a cold and a warm tube side by side). Since 2026-11-05 they are only the visible sources; the light comes from the `Lighting` actors (4.7). |
 | `LEDWall` | StaticMeshActor | LED wall model, surface at x 10..40, inside the room's opening. Hidden in game (D23): it sits exactly on the projection surface. |
 | `BP_Agent` | `BP_Agent_C` | The MetaHuman agent (see 4.5), at x=-220, about 2.4 m behind the wall |
 | `NDC_Basic` | `NDC_Basic_C` | nDisplay config ported from the lab, at (319, 16, 10), yaw 180. Its origin is the Moverse tracking origin (see 4.3, 4.4). |
-| `NDC_HD_02` | `NDC_HD_02_C` | Older nDisplay config of this project, at (300, -60, 100), yaw -170 (Q4) |
-| `PPV_FixedExposure` | PostProcessVolume | New. Unbound; auto exposure locked at -2.9 EV100 (min = max). See 4.7. |
+| `PPV_Lab` | PostProcessVolume | Unbound; the only post-process volume. Was `PPV_FixedExposure` (exposure only) until 2026-11-05. Settings in 4.7. |
+| `Light_Strip_1` .. `Light_Strip_9` | RectLight | Folder `Lighting` (2026-11-05). One per ceiling LED strip, 2 cm below it, pointing down (4.7). |
+| `Light_Fill` | RectLight | Folder `Lighting` (2026-11-05). Soft front light from the wall opening onto the agent's face (4.7). |
+| `Light_CeilingFill` | RectLight | Folder `Lighting` (2026-11-05). Weak shadowless uplight 20 cm under the ceiling; lights only the ceiling (4.7). |
 | `Walking` | LevelSequenceActor | Plays `/Game/MetaHumans/Animations/Walking` |
-| `SpotLight` | SpotLight | At (260, 0, 280). Switched off (light component not visible), so only the emissive lab lights light the scene (D22). |
+| `SpotLight` | SpotLight | At (260, 0, 280). Switched off (light component not visible) since D22; left off and unused. |
 | `PlayerStart` | | |
 
 The lab level also had SkyLight, DirectionalLight, SkyAtmosphere, VolumetricCloud and ExponentialHeightFog. These were not ported (see Q8).
 
 ### 4.3 nDisplay
 
-| | `NDC_Basic` (ported from the lab) | `NDC_HD_02` (pre-existing) |
-|---|---|---|
-| Asset | `/Game/ExampleConfigs/NDC_Basic` | `/Game/NDC_HD_02` |
-| Cluster | 1 node `Node_0` on the rendering PC itself, windowed (borderless) 5120x1536 at (0, 0), spanning `DISPLAY2` and `DISPLAY3` | 1 node, 1920x1080 |
-| Viewports | `VP_1` = left eye (camera `ViewPointL`) at (0, 0, 2560, 1536); `VP_0` = right eye (camera `ViewPointR`) at (2560, 0, 2560, 1536). Viewport remap off. | 1 viewport, `DefaultViewPoint` |
-| Projection | Mesh policy on component `LEDWALL`, mesh `/Game/Assets/LEDWall_nDisplay` (D20) | Simple policy on a flat screen |
-| Output remap | On: external file `Config/nDisplay/StereoCheckerboardRemap.obj` (3D, see below) | Off |
-| Inner frustum cameras | `ICVFXCameraL`, `ICVFXCameraR` present; inner frustums disabled at stage level | None |
-| Tracking | Yes (see 4.4) | No |
+**Rule (D54): `NDC_Basic` is locked.** It is configured as it runs on the lab PC since 2026-11-05, with head-tracked 3D verified on the wall by the owner. Do not change any of its parameters, in the Blueprint `/Game/ExampleConfigs/NDC_Basic` or in its placed actor in `DefaultMap` (cluster and window, viewports, stereo mode, output remap, projection, components and their transforms, eye cameras, tracking graph, actor transform), and do not re-save or replace their files (`Content/ExampleConfigs/NDC_Basic.uasset`, `Content/__ExternalActors__/DefaultMap/8/20/BYDHEQD265B040BKAIZ09D.uasset`). Any change can break the 3D effect on the wall. Only the owner can ask for a change, for a specific setting; after it, the owner checks the 3D on the wall. `git status` shows if either file changed.
+
+`NDC_Basic` (ported from the lab) is the config that runs the wall. The older `NDC_HD_02` (1 node 1920x1080, one flat viewport, no tracking) was removed on 2026-11-05 (D50). `NDC_BasicLED` (owner, lab PC, 2026-11-05) is a test config, asset `/Game/ExampleConfigs/NDC_BasicLED`: flat 500x300 screen component `nDisplayScreen`, eye cameras `DisplayClusterCameraL1` / `R1` at -3 / +3 cm under `Rig`, no output remap. The owner reported 3D working with it, and `NDC_Basic` copies its output settings since then (D49). Its actor (was at (959, 16, 10), yaw 180) was removed from `DefaultMap` by the owner on the lab PC on 2026-11-05; the asset stays as reference for Q27.
+
+| | `NDC_Basic` |
+|---|---|
+| Asset | `/Game/ExampleConfigs/NDC_Basic` |
+| Cluster | 1 node `Node_0` on the rendering PC itself, fullscreen 2560x1536 at (0, 0), `DISPLAY2` (the wall's DP input) only. Until 2026-11-05: windowed 5120x1536 spanning `DISPLAY2` and `DISPLAY3`. |
+| Viewports | `VP_1` = left eye (camera `ViewPointL`) and `VP_0` = right eye (camera `ViewPointR`), both at (0, 0, 2560, 1536), on top of each other; stereo mode Default (was Force Mono). Same layout as `NDC_BasicLED` (D49). Viewport remap off. |
+| Projection | Mesh policy on component `LEDWALL`, mesh `/Game/Assets/LEDWall_nDisplay` (D20) |
+| Output remap | Off since 2026-11-05, as in `NDC_BasicLED` (D49). Before: external file `Config/nDisplay/StereoCheckerboardRemap.obj` (see 3D below). |
+| Inner frustum cameras | `ICVFXCameraL`, `ICVFXCameraR` present (enabled); inner frustums disabled at stage level. Left off on purpose: `NDC_BasicLED` has them on but has no ICVFX cameras, so on would add two inner-frustum images here. |
+| Tracking | Yes (see 4.4) |
 
 Details of `NDC_Basic`:
 - Components: `nDisplayXform` local (279, 16, 150), the measured wall position in tracking space (4.4); `LEDWALL` local (0, 0, -150), yaw 180, scale 1 (D8); `Rig` local (0, 0, 50), moved by the tracking at runtime; `ViewPointL` at `Rig` local (0, -3.2, 0) and `ViewPointR` at (0, 3.2, 0), i.e. 6.4 cm between the eyes, stereo offset None.
@@ -123,7 +130,8 @@ Details of `NDC_Basic`:
 - The placed `NDC_Basic` actor keeps its own copy of the nDisplay config. Changes to the Blueprint's config (window, viewports, output remap, stage settings) do not reach it; both were changed and saved.
 - Launch: editor toolbar, nDisplay Launch, config `NDC_Basic`, node `Node_0` (D17). Arguments come from `Config/DefaultDisplayClusterLaunch.ini` (same as the 5.7 Switchboard launch, including `-dc_dev_mono`, plus `-EnablePlugins=MoversePlugin`). Play-In-Editor does not render through nDisplay: it shows the normal player camera, without tracking-driven view or 3D.
 - Head-tracked view: the mesh projection computes the frustum from each eye through the wall, so the wall's edges always match the virtual room and the view widens as the user walks closer.
-- 3D (D19): the frame holds the left eye at x 0..2559 and the right eye at x 2560..5119. The output remap mesh draws the right eye over the DP half, then the left eye on top with reversed u; the lab's modified engine shader (3.1) mirrors it back and keeps every other pixel. Result on DP: a per-pixel checkerboard of both eyes, which the polarized wall separates. The HDMI half shows the right eye and is ignored by the processor. Verified 2026-10-21 with a red/green per-eye tint: each eye saw only its own colour through the glasses. If the engine shader is restored to the original, the DP output becomes a mirrored left eye and the 3D breaks (Q21).
+- 3D since 2026-11-05 (D49): `NDC_Basic` uses the same output as `NDC_BasicLED` (one fullscreen 2560x1536 window, both eye viewports on top of each other, no output remap); the owner verified 3D on the wall with `NDC_Basic` on 2026-11-05. How the two eyes reach the wall without the checkerboard remap is not documented yet (Q27). With the old settings and the 2560-wide window, `NDC_Basic` showed only half the picture: the remap mesh expects a 5120-wide frame. The engine shader `OutputRemapShaders.usf` on the lab PC was edited again on 2026-11-05 17:56 (not by Claude); `NDC_Basic` no longer uses it.
+- 3D until 2026-11-05 (D19): the frame holds the left eye at x 0..2559 and the right eye at x 2560..5119. The output remap mesh draws the right eye over the DP half, then the left eye on top with reversed u; the lab's modified engine shader (3.1) mirrors it back and keeps every other pixel. Result on DP: a per-pixel checkerboard of both eyes, which the polarized wall separates. The HDMI half shows the right eye and is ignored by the processor. Verified 2026-10-21 with a red/green per-eye tint: each eye saw only its own colour through the glasses. If the engine shader is restored to the original, the DP output becomes a mirrored left eye and the 3D breaks (Q21).
 - History: in all lab runs the node was launched with `-dc_dev_mono`. The 5.7 configs overlapped both eye viewports with a flipped `VP_1`, made for an earlier version of the same shader hack. The June lab version had eye cameras at y = -3 / +3 cm on a flat 500x300 cm screen.
 - Lab crash history: 20 of the 23 crash reports in the 5.7 lab project were GPU crashes ("GPU Crashed or D3D Device Removed"), on 2026-06-16 and 2026-07-07 (see Q7). No crash during the 2026-10-21 runs.
 
@@ -151,6 +159,7 @@ Details of `NDC_Basic`:
 - Component `LiveSession` (`MRLabLiveSession`, 4.8). BeginPlay (after EnableInput) calls `StartSession`. `OnUserTranscript` and `OnAgentTranscript` go to PrintString with keys `User` / `Agent`, so each side shows one growing line on screen (hidden in nDisplay nodes by `DisableAllScreenMessages`) and in the log.
 - Gaze (4.10): functions `InitGaze` (called after `StartSession` at BeginPlay) and `UpdateGaze` (called from Event Tick); variables `NDC`, `HeadTarget`, `EyeTarget`.
 - No vision or UI yet.
+- LOD (2026-11-05, lab PC, D52): the agent placed in `DefaultMap` has its `LODSync` component set to `Forced LOD` 0, so face, body and hair (strands) always render at full detail. Before, `LODSync` chose LODs from the screen size, and at wall viewing distance the face dropped to LOD 2 and the body to LOD 1. Only the level instance was changed; the `BP_Agent` asset keeps automatic LODs.
 - On 2026-10-21 the editor showed `BP_Agent` as modified but unsaved, without anyone editing it in that session. It was left unsaved.
 
 ### 4.6 Tooling for AI agents
@@ -159,9 +168,22 @@ Described in each machine's local `CLAUDE.md`: UE's built-in MCP server (`.mcp.j
 - Lab PC: `Tools/capture_viewport.py` fails there (the MCP server answers with plain JSON; the script expects a streamed reply). Calling `CaptureViewport` through another MCP client works.
 
 ### 4.7 Lighting and exposure
-- Light sources: only the emissive materials of the `MRLab` model (`M_LightsCold`, `M_LightsWarm`), as the owner asked; `SpotLight` is switched off (D22).
-- Exposure: `PPV_FixedExposure` locks auto exposure at -2.9 EV100 for the editor, PIE and nDisplay. Before, each eye's viewport adapted on its own, so the brightness and colour changed with the user's position. -2.9 was chosen by matching the average brightness of the previous automatic exposure in the room; each +1 halves the brightness.
-- Known remaining effects: the bounce light from the emissive materials (Lumen) is computed per view and may still change slightly with the viewer's position; a pale, noisy silhouette of the agent appears on the back wall in editor captures (Lumen artifact, not investigated) (Q22).
+Since 2026-11-05 (lab PC, D51 to D53). Before: emissive light only (D22), see History below.
+- Light sources (folder `Lighting` in `DefaultMap`, all movable rect lights, 4000 K, intensities in lumens):
+  - `Light_Strip_1` .. `Light_Strip_9`: the main light, like the real lab. One per ceiling LED strip of the `MRLab` model, centred on it at z = 318.5 (2 cm under the strip), pointing straight down; source 520 x 4 cm along the strip; 80 lm each; soft shadows; barn doors off (angle 90, length 0); attenuation radius 1200.
+  - `Light_Fill`: keeps the agent's face readable. At (30, 0, 210) in the wall opening, aimed at the agent's face (pitch -11.7, yaw -178.3); source 250 x 150 cm; 120 lm; shadows on; attenuation radius 500, so it fades before the back wall.
+  - `Light_CeilingFill`: at (-336, 0, 300), pointing up; source 640 x 520 cm; 40 lm; no shadows, no specular. A rect light only lights what is in front of its plane, so it reaches only the ceiling and the top 20 cm of the walls. Why: the downlights leave the ceiling with bounce light only, and the ceiling panel material's AO texture (`panels_ao`) darkens bounce light, which showed as dark blotches on the panels.
+  - The emissive strips (`M_LightsCold`, `M_LightsWarm`, unchanged) stay as the visible light sources. At the new exposure their own bounce light is about 3 % of the wall brightness (measured with all lights at 0).
+  - `SpotLight` stays off.
+- Post-process `PPV_Lab` (unbound, the only volume; overridden settings): exposure fixed at 3.3 EV100 (histogram method, min = max; was -2.9 with the emissive light; each +1 halves the brightness); local exposure off (highlight and shadow contrast scale 1.0, the project default 0.8 depended on what was in view); motion blur 0; vignette 0; lens flares 0; bloom 0.4; white balance 6500 K, tint 0; Lumen GI with screen traces off, final gather quality 2, scene lighting quality 2, scene detail 2, scene lighting and final gather update speed 2; Lumen reflections quality 2.
+- Why motion blur is off: nDisplay sets `vr.AllowMotionBlurInVR=1` for stereo (`DisplayClusterViewportClient.cpp`), and the default motion blur (0.5) then blurred the whole picture whenever the head moved, which smeared fine textures. A window does not blur when you move.
+- Why screen traces are off: with screen traces, Lumen's bounce light depends on what is on screen. The head-tracked frustum changes with the user's position, so the bounce from the thin emissive strips, and with it the colour of the room, changed with distance (the owner saw warmer far away, cooler close up). Without screen traces the bounce comes from the Lumen scene only, and the real lights carry most of the light anyway.
+- Render config (`DefaultEngine.ini` `[SystemSettings]`): `r.ScreenPercentage=100`; nDisplay multiplies each viewport's buffer ratio by this value (`DisplayClusterViewport.cpp`, `SetViewportBufferRatio`), and the editor had 75 at runtime. `r.ViewTextureMipBias.Offset=0` (TSR default -0.3): textures are no longer sharpened beyond the render resolution, which reduces shimmer and moiré on the fine wall, floor and ceiling textures.
+- Measured in editor captures (2026-11-05), camera at 90, 250 and 450 cm in front of the wall plus one off-axis: back wall and side walls have the same colour and brightness in all views (back wall RGB 213/195/165 near and 214/195/166 far). The scene is warmer than before (white walls R/B about 1.3 instead of 1.14) because of the 4000 K light; the old emissive mix had a yellow-green cast (G above R).
+- GPU (editor `ProfileGPU`, one view of about 4 MP, close to one eye on the wall): about 6.5 ms for the scene; the largest new costs are shadow projection for the 10 shadowed lights (about 1.5 ms) and strand hair from LOD 0 (about 1.4 ms). Not measured in the nDisplay node.
+- Not verified on the wall: colour stability while walking, texture shimmer, frame rate of the node, how the 4000 K light compares with the real lab (Q28).
+- To change the light colour or brightness: select all actors in folder `Lighting` and edit `Temperature` / `Intensity` together in the Details panel; change the overall brightness with the exposure in `PPV_Lab` instead.
+- History: until 2026-11-05 the only light was the emissive materials (D22), exposure -2.9 EV100 in `PPV_FixedExposure`. Before that volume existed, each eye's viewport adapted its exposure on its own, so brightness and colour changed with the user's position.
 
 ### 4.8 Conversation (`Plugins/MRLabLive`)
 - C++ project plugin, one Runtime module, Win64 only (D25). Source and the built `UnrealEditor-MRLabLive.dll` + `UnrealEditor.modules` are in Git (DLL via LFS, the `.pdb` is not), so the lab PC runs it without a compiler (D27). The DLL only loads in an engine with the same build ID (5.8.0 changelist 55116800 on both machines); after an engine update it must be rebuilt on the laptop and committed again.
@@ -189,7 +211,7 @@ Described in each machine's local `CLAUDE.md`: UE's built-in MCP server (`.mcp.j
 - Eyes (D35, D37): `/Game/MetaHumans/Agent/ABP_Agent_Face_PostProcess`, a copy of `ABP_Face_PostProcess`, set on `SKM_Agent_FaceMesh`. A `Modify Curve` node (Blend, alpha 1) before RigLogic sets `CTRL_expressions_eyeLook{Left,Right,Up,Down}{L,R}` from the variables `EyeLookLeft/Right/Up/Down` (same value for both eyes), so RigLogic moves eyes and lids. `UpdateGaze` computes the eye target direction in the head bone's space (X up, Y forward, Z to the agent's right) and divides by the measured eye rotation per curve unit: 40 degrees sideways (37.5 / 42.3 for the two eyes), 29.7 up, 39.9 down; clamped to 0..1.
 - The MetaHuman `Common` AnimBPs are unchanged; only the agent's own meshes point to the copies.
 - Tested on the laptop (2026-11-05) with fake Moverse data (head moving 2 m to each side and 0.8 m forward/back, 4 to 5 m from the agent): eye direction within 0.4 to 3.2 degrees of the user's head; head turning about two thirds of the angle with a small lag; after the data stops, `bHeadTracked` turns false and head and eyes are back to straight ahead (0 degrees) within about 3 s. Screenshots from the user's line of sight show the face turned to the viewer when tracked and turned away when not (not in Git). The conversation session still starts.
-- Not tested: real Moverse, the wall, the nDisplay node (its config file had to be regenerated by nDisplay Launch, which was not used), how natural it looks to a person. Known limits: the head-bone-to-eye offset of the user (Q23) is not applied (about 1 to 1.5 degrees at 3 to 5 m); both eyes get the same rotation (no convergence); the face is dark under the current lighting (Q22).
+- Not tested: real Moverse, the wall, the nDisplay node (its config file had to be regenerated by nDisplay Launch, which was not used), how natural it looks to a person. Known limits: the head-bone-to-eye offset of the user (Q23) is not applied (about 1 to 1.5 degrees at 3 to 5 m); both eyes get the same rotation (no convergence). The face was dark under the emissive-only lighting; since 2026-11-05 `Light_Fill` lights it (4.7).
 
 ### 4.11 Lip sync
 - Method (D41, D42): Epic's real-time speech-to-face model from UE 5.8 (`/StreamingADA/xsada_face_base_fp32_v2_0_0`, the model of `FSpeechAnimationSolverV4` in module `SpeechAnimationSolver`, hidden engine plugin `StreamingADA`, enabled through `MetaHumanCoreTech`; the same model as MetaHuman's audio Live Link source). Lookahead 80 ms, mood auto-detected from the voice. Output: the 251 MetaHuman face controls (`CTRL_expressions_*`): jaw, lips, tongue, cheeks, brows, blinks (D42). No head motion.
@@ -217,7 +239,7 @@ Generic steps. A precise plan is written and agreed before each step starts (sec
 ### Step 3. Lab PC setup and validation: DONE (2026-10-21 on the lab PC, in the repo since 2026-10-27)
 - Goal: the project runs on the lab rendering PC with nDisplay stereo on the wall and live Moverse tracking.
 - Result: head-tracked stereo 3D on the wall with live Moverse tracking, launched from the editor with nDisplay Launch (4.3, 4.4, 4.7). Verified by the owner.
-- Remaining: a regular way to get lab PC changes into the repo (Q19); Moverse plugin long term (Q20); decide on the engine shader dependency (Q21); lighting stability and eye offset fine-tuning (Q22, Q23); Q4, Q7, Q8.
+- Remaining: a regular way to get lab PC changes into the repo (Q19); Moverse plugin long term (Q20); decide on the engine shader dependency (Q21); eye offset fine-tuning (Q23); check the new lighting on the wall (Q28); Q7, Q8.
 
 ### Step 4. Conversation with gpt-live-1: DONE on the laptop (2026-10-27), lab PC test pending
 - Goal: the agent holds a spoken conversation with a user through OpenAI `gpt-live-1` (G1, G2).
@@ -256,15 +278,17 @@ Lab and display:
 - **Q1.** ANSWERED 2026-10-21: one signal on the DP input, both eyes interleaved per pixel in a checkerboard (4.3, D19).
 - **Q2.** ANSWERED 2026-10-21: eye cameras at -3.2 / +3.2 cm under `Rig` (D19).
 - **Q3.** ANSWERED 2026-10-21: the projection wall now sits on the `LEDWall` model actor (x 10..40), inside the room's opening; the tracking calibration was kept (D21).
-- **Q4.** Keep or remove `NDC_HD_02` from the level?
+- **Q4.** ANSWERED 2026-11-05: removed, actor and asset (D50).
 - **Q5.** ANSWERED 2026-10-21: build from `MoversePlugin_UE5.8_v1.0.zip`, installed as a project plugin on the lab PC (D15).
 - **Q6.** ANSWERED 2026-10-21: MCP auto-start enabled on the lab PC (D18).
 - **Q7.** GPU crashes seen in the lab (4.3): cause unknown. Check whether they still happen in 5.8 (none in the 2026-10-21 runs).
-- **Q8.** Bring over the lab level's sky, sun and fog actors or not? The owner wants the lab model's emissive lights to be the only light sources (D22), which suggests not.
+- **Q8.** Bring over the lab level's sky, sun and fog actors or not? The room is closed except for the wall opening and is lit by its ceiling strips (D51), which suggests not.
 - **Q20.** Moverse plugin long term: keep `"Optional": true` plus the `-EnablePlugins=MoversePlugin` flag (current; the editor needs the flag too for PIE tracking), or remove `"Optional"` and add the plugin to the repo so every machine has it (the laptop would build it from source or get the binaries)?
 - **Q21.** The 3D output depends on the lab's edit of the engine's nDisplay shader (3.1), which an engine update or "Verify" would undo, and which the laptop does not have. Keep relying on it, or move the checkerboard into the project (needs a C++ plugin, see Q9)?
-- **Q22.** Lighting: is the remaining view dependence of the emissive bounce light acceptable, or should Lumen quality be raised (GPU cost, two eyes at 2560x1536)? Look at the agent silhouette artifact on the back wall.
+- **Q22.** ANSWERED 2026-11-05: not acceptable (the owner saw the room turn warmer far away and cooler close up). Real lights on the ceiling strips plus a fill, Lumen screen traces off, Lumen quality 2 (4.7, D51, D52). The agent silhouette on the back wall was not seen in the new captures; check on the wall.
+- **Q28.** New lighting on the wall (4.7): does the room stay the same colour while walking, are the fine textures calm, is the node frame rate fine, and does the 4000 K light match the real lab (warmer or cooler, brighter or darker)? Tuning: temperature and intensity of the `Lighting` actors, exposure in `PPV_Lab`.
 - **Q23.** Tracking fine-tuning: add the head-bone-to-eye offset (about 8 cm forward) and check for a small rotation between the tracking axes and the wall?
+- **Q27.** Since 2026-11-05 `NDC_Basic` runs without the output remap, like `NDC_BasicLED` (D49). How do the two eyes now reach the wall (processor setting, engine shader, something else)? Are `Config/nDisplay/StereoCheckerboardRemap.obj` and the engine shader edit still needed (affects Q21, D19)? Should the eye distance stay 6.4 cm (`NDC_Basic`) or become 6 cm (`NDC_BasicLED`)? `NDC_Basic` is locked (D54): any change that follows from this question needs the owner's explicit request.
 
 Conversation:
 - **Q9.** ANSWERED 2026-10-27: C++, in the project plugin `MRLabLive` (D25).
@@ -288,7 +312,7 @@ Behaviour:
 - **Q18.** ANSWERED 2026-11-05: lip sync with Epic's MetaHuman real-time audio solver, after a video comparison with NVIDIA Audio2Face (D41, D43).
 
 Process:
-- **Q19.** The lab PC can pull from GitHub but cannot push. How do changes made on the lab PC (assets, config, README updates) get back into the repo? Done once on 2026-10-27: the owner zipped the lab project and the laptop merged it (section 8).
+- **Q19.** The lab PC can pull from GitHub but cannot push. How do changes made on the lab PC (assets, config, README updates) get back into the repo? Done once on 2026-10-27: the owner zipped the lab project and the laptop merged it (section 8). Done the same way again on 2026-11-05 (`MRLabAgent5Nov.zip`).
 
 ## 7. Decisions log
 
@@ -315,7 +339,7 @@ Process:
 | D19 | 2026-10-21 | Stereo: left eye `VP_1` and right eye `VP_0` side by side in a 5120x1536 window; an output remap mesh (`Config/nDisplay/StereoCheckerboardRemap.obj`) with the lab's modified engine shader turns them into a per-pixel checkerboard on DP. Eye cameras at -3.2 / +3.2 cm. The old horizontal flip on `VP_1` removed. | Claude (owner verified) |
 | D20 | 2026-10-21 | Project onto `/Game/Assets/LEDWall_nDisplay`, a copy of the wall mesh with UVs over the whole wall (u = arc length), instead of the per-panel UVs of `LEDWall`. | Claude |
 | D21 | 2026-10-21 | `NDC_Basic` origin = Moverse tracking origin, wall placed at the position measured in the calibration run, and the whole setup placed so the projection wall sits on the `LEDWall` model actor (answers Q3). | Claude (from the owner's calibration run; owner confirmed the result) |
-| D22 | 2026-10-21 | Only the lab model's emissive materials light the scene; `SpotLight` switched off. Exposure fixed at -2.9 EV100 with `PPV_FixedExposure`. | Owner (emissive only), Claude (exposure value) |
+| D22 | 2026-10-21 | Only the lab model's emissive materials light the scene; `SpotLight` switched off. Exposure fixed at -2.9 EV100 with `PPV_FixedExposure`. Changed by D51 and D52 on 2026-11-05. | Owner (emissive only), Claude (exposure value) |
 | D23 | 2026-10-21 | `LEDWall` model actor hidden in game: it sits exactly on the projection surface and would cover the view. | Claude |
 | D24 | 2026-10-21 | Mandatory rule for AI agents on the lab PC: change nothing outside `C:\Users\VR Group\Documents\Unreal Projects\Matteo\` (reading and temp files are allowed). Written in `CLAUDE.md` / `CLAUDE.lab.md`. | Owner |
 | D25 | 2026-10-27 | The conversation (connection to OpenAI, microphone, agent voice) runs inside Unreal in a small C++ project plugin, not in an external program. Answers Q9, Q10. | Owner |
@@ -342,10 +366,82 @@ Process:
 | D46 | 2026-11-05 | Lip sync model run directly through NNE on the CPU, late steps skip only the model run (no context restart). | Claude |
 | D47 | 2026-11-05 | Lab facts only from the lab knowledge base (else "I don't know"); general topics such as technology, mixed reality or science may come from Frank's general knowledge. Refines D45. | Owner |
 | D48 | 2026-11-05 | Frank should sound like a person, not an AI assistant: speaking-style section added to his prompt. | Owner (request), Claude (wording) |
+| D49 | 2026-11-05 | `NDC_Basic` takes the output settings of `NDC_BasicLED`: fullscreen, output remap off, stereo mode Default on both eye viewports (window and overlapping viewports were already set that way). Wall (`LEDWALL`, `nDisplayXform`, actor position), tracked eye cameras and inner frustums (off) unchanged. Owner verified 3D on the wall. | Owner (Claude chose which settings to copy) |
+| D50 | 2026-11-05 | Remove `NDC_HD_02` (actor in `DefaultMap` and asset `/Game/NDC_HD_02`): nothing used it, and it could be picked by mistake in nDisplay Launch. Answers Q4. | Owner |
+| D51 | 2026-11-05 | The scene is lit like the real lab, from the high LED strips, but not only by them: real lights on the 9 ceiling strips plus a soft fill so the agent is not too dark. Light colour 4000 K. Changes D22 (emissive only); the emissive strips stay as visible sources. | Owner (light sources, 4000 K), Claude (placement, intensities) |
+| D52 | 2026-11-05 | One unbound post-process volume `PPV_Lab` (the old `PPV_FixedExposure`) with motion blur, vignette, lens flares and local exposure off, fixed exposure and white balance, Lumen GI screen traces off and Lumen quality 2; `r.ScreenPercentage=100` and `r.ViewTextureMipBias.Offset=0` in `DefaultEngine.ini`; agent level instance at forced LOD 0. | Claude (plan approved by owner) |
+| D53 | 2026-11-05 | Add `Light_CeilingFill` (weak uplight, ceiling only) instead of changing the ceiling panel material, whose AO texture showed as dark blotches once the ceiling got only bounce light. Not in the approved plan. | Claude |
+| D54 | 2026-11-05 | `NDC_Basic` is locked as configured on the lab PC on 2026-11-05 (Blueprint and placed actor, all parameters, rule in 4.3). No changes and no re-saves of its two files unless the owner asks for a specific change; a change can break the 3D effect on the wall. | Owner |
 
 ## 8. Work log
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
+
+### 2026-11-05 (Claude Code, laptop): last working lab PC version into the repo, NDC_Basic locked
+Done:
+- The owner zipped the lab project (`MRLabAgent5Nov.zip`, saved 19:31, not in Git) as the last working version on the lab PC. Its base is `005151c`, the last commit on GitHub, plus the four lab PC entries below. Compared file by file with the repo.
+- Taken from the zip, byte for byte: `Config/DefaultEngine.ini` (`[SystemSettings]`, 4.7); `Content/ExampleConfigs/NDC_Basic.uasset` and the `NDC_Basic` actor `__ExternalActors__/DefaultMap/8/20/BYDHEQD265B040BKAIZ09D.uasset` (D49); new `Content/ExampleConfigs/NDC_BasicLED.uasset`; `BP_Agent.uasset`; the `PPV_Lab` and `BP_Agent` level actors (`A/FO/...`, `B/77/...`); the 11 new `Lighting` actors and the folder object (list in the lighting entry below); `README.md` (the lab version, then this entry). Removed: `Content/NDC_HD_02.uasset` and its actor `C/FP/QEVUQ1QNXPDFXTWZO9HFD6.uasset` (D50).
+- Not taken: `Saved/` (lab logs, crash reports, autosaves, backups, editor settings); the lab `CLAUDE.md` (machine-local); `.gitattributes`, `.gitignore`, `.mcp.json`, `Content/Python/*.py`, `Tools/*.py`, `Config/nDisplay/StereoCheckerboardRemap.obj` (differ only in line endings). The zip has no `Plugins/` folder; `Plugins/MRLabLive` stays as in Git (the lab runs the same DLL since its pull of `005151c`).
+- `BP_Agent.uasset` was saved on the lab PC at 19:27, after the last lab entry. Its text (names, prompt) is the same as in `005151c`; what changed (numbers, or only a re-save) is unknown, it was not opened in the editor.
+- The `NDC_BasicLED` actor is gone from the level in the lab copy (its folder `4/RZ/` is empty, no level file refers to `NDC_BasicLED`). Section 4.2 and 4.3 updated; the asset stays.
+- Rule from the owner: `NDC_Basic` is locked, no parameter changes (D54, sections 2 and 4.3, Q27). Also added to the laptop's `CLAUDE.md`.
+Verified: every copied file has the same SHA-256 as in the zip, including both `NDC_Basic` files; no level actor other than `NDC_Basic` uses an nDisplay config class.
+Not verified: this version in the laptop editor (not opened); anything on the wall.
+Left:
+- Lab PC: its working tree already holds these changes, uncommitted, so a plain `git pull` will refuse (changed and untracked files). Suggested: `git stash push -u` (keeps a copy), `git pull`, check that `NDC_Basic.uasset` and its actor did not change, then drop the stash and the older `stash@{0}`. `Plugins/MoversePlugin` and `Saved/` are not touched by this (excluded or ignored).
+- Lab PC: add the D54 rule to its local `CLAUDE.md`. Its calibration note (move the `NDC_Basic` actor, `nDisplayXform`) now needs the owner's explicit request.
+- Laptop: an older uncommitted change to the `MRLab` room actor (`8/PP/UY0ZZTQJH50OALPKDY1JGP.uasset`, collision off, saved on the laptop at 16:52) is not part of this commit; the lab copy of that file equals Git. Q27, Q28.
+
+### 2026-11-05 (Claude Code, lab PC): lighting and post-process
+Done:
+- Owner's report: fine textures behave strangely when moving, the room gets warmer far away and cooler close up, the picture does not feel high quality; wanted a post-process volume and lights like the real lab (from the high LED strips, but not only those, so the agent is not too dark). Plan approved by the owner, light colour 4000 K (D51, D52).
+- Causes found: nDisplay turns motion blur on for stereo and the level had the default motion blur, so every head movement blurred the picture; the only light was Lumen bounce from 1 cm emissive strips, which depended on what was on screen (screen traces); the emissive cold/warm mix gave a yellow-green cast; local exposure 0.8 also depended on the view; the agent's face dropped to LOD 2 at viewing distance; the editor ran at 75 % screen percentage, which nDisplay would also apply.
+- `PPV_FixedExposure` renamed `PPV_Lab` and extended (4.7). New rect lights in folder `Lighting`: 9 strip lights, `Light_Fill`, `Light_CeilingFill` (D53). `DefaultEngine.ini` `[SystemSettings]` with `r.ScreenPercentage=100`, `r.ViewTextureMipBias.Offset=0`. Agent level instance: `LODSync` forced LOD 0 (4.5). Exposure recalibrated to 3.3 EV100 so the walls have about the old brightness.
+- Saved only these packages; the owner's unsaved `BP_Agent` asset and `NDC_BasicLED` actor (`4/RZ/91VHHPAPD0EL2Y3Z4DA590`) were left as they were. Backups of the changed files before the change: `Saved/ClaudeTemp/Backup_2026-11-05_lighting/`. Before/after captures: `Saved/ClaudeTemp/Lighting_2026-11-05/`.
+Verified (editor captures, not the wall): wall colour and brightness the same from 90, 250 and 450 cm and off-axis; emissive bounce about 3 % of the wall light; face lit and readable; ceiling blotches mostly gone with `Light_CeilingFill`; scene render about 6.5 ms on the GPU for a 4 MP view.
+Not verified: nDisplay Launch with the new lighting (colour while walking, texture shimmer, node frame rate, 3D); the `DefaultEngine.ini` values take effect in the editor only after a restart (set by console for this session, so the editor already shows them now).
+Left: owner checks on the wall (Q28). If fine textures still shimmer there: supersample the eye viewports (nDisplay screen percentage above 1) or calm the high-frequency lab textures (floor carpet, wall plaster).
+Changed files on the lab PC (not committed): `Config/DefaultEngine.ini`, `README.md`; level actors `Content/__ExternalActors__/DefaultMap/A/FO/6WRBYAQF6CXURGN2HUCM5S.uasset` (`PPV_Lab`), `.../B/77/Z6Q065VEMQDI7TPI37X790.uasset` (`BP_Agent` instance); new `.../6/N0/I8GEYCZMKDT5I4DKZ9M6MH`, `.../D/DQ/3O4Q7Q5EA8SEWINLYBIX3N`, `.../6/8D/AA50OQGBIXRNZ2KY8RQQQH`, `.../4/BV/RHB1PV7BVX03HQFC50RUZB`, `.../0/YU/2NYV7TL20ZHW5MRMA9ZSLG`, `.../0/PU/2SUV3RKAU3O5MEJ3GLHFCE`, `.../0/VJ/JA632BUZVB1EK1D48TNFTX`, `.../3/CI/4ZDH082II4TZQSU1U84Y2O`, `.../D/RL/ZPY2E33TRWWTJKKVILYPS6` (strip lights 1 to 9), `.../3/GW/LJDG0WQQFOA27JYYZSQXV5` (`Light_Fill`), `.../B/G8/ZBRROZ1OS88B1CO1F8USQF` (`Light_CeilingFill`), all `.uasset` under `Content/__ExternalActors__/DefaultMap/`, and `Content/__ExternalObjects__/DefaultMap/3/LK/R3UHMY6BQO2XH00CUZ81Y6.uasset` (actor folder `Lighting`). Not in Git: `CLAUDE.md` (lighting and capture notes).
+
+### 2026-11-05 (Claude Code, lab PC): NDC_HD_02 removed
+Done:
+- Owner decided to remove `NDC_HD_02` (Q4, D50). Checked first: the only referencer of `/Game/NDC_HD_02` was its own placed actor; `BP_Agent.InitGaze` finds the nDisplay actor by the class `NDC_Basic_C`; no config, script or tool mentions it.
+- Removed the actor from `DefaultMap` and saved only its package (file `__ExternalActors__/DefaultMap/C/FP/QEVUQ1QNXPDFXTWZO9HFD6.uasset` deleted), then deleted the asset `/Game/NDC_HD_02`. Backups in `Saved/ClaudeTemp/Backup_2026-11-05_NDC_HD_02/`; both files are also in Git history.
+- Left alone (owner's unsaved editor changes at that time): `BP_Agent`, and the `NDC_BasicLED` actor, which the owner deleted in the editor at 18:54.
+Verified: asset gone from disk and from the asset registry; `NDC_Basic` is the only nDisplay actor left in the level; `NDC_Basic` files unchanged.
+Not verified: nDisplay Launch after the removal.
+Left: owner saves or discards the open `BP_Agent` and `NDC_BasicLED` actor changes; if `NDC_BasicLED` goes, 4.2 and 4.3 should drop it (its asset stays as reference for Q27 unless deleted too).
+Changed files on the lab PC (not committed): deleted `Content/NDC_HD_02.uasset` and `Content/__ExternalActors__/DefaultMap/C/FP/QEVUQ1QNXPDFXTWZO9HFD6.uasset`; `README.md`. Not in Git: `CLAUDE.md`.
+
+### 2026-11-05 (Claude Code, lab PC): pull of the lip sync version, NDC_Basic kept
+Done:
+- Owner verified 3D on the wall with `NDC_Basic` after D49.
+- Pulled from GitHub: `be0e203` to `005151c` (7 commits: Step 7 lip sync, its fixes, Frank's prompt). None of them touches the nDisplay configs. The owner closed the editor first (the pull replaces the `MRLabLive` DLL, which the running editor locks) and did not save the `NDC_BasicLED` actor (it was only deleted and undone).
+- Before the pull, all local changes were copied to `Saved/ClaudeTemp/Backup_2026-11-05_before_pull/`. `README.md` was put aside with `git stash` (`stash@{0}`, still there), the pull was a fast-forward, and the lab entries (4.2, 4.3, Q27, D49, these work log entries) were merged into the new README by hand.
+Verified: `NDC_Basic.uasset`, its actor, `NDC_HD_02.uasset`, `NDC_BasicLED.uasset` and its actor are byte-identical before and after the pull; LFS files downloaded. After the editor restart: `MRLabLive` loads (new DLL), `BP_Agent` loads, both configs of `NDC_Basic` still have fullscreen on, remap off, stereo Default, cameras `ViewPointL/R`, mesh `LEDWALL`; actor at (319, 16, 10) yaw 180, `nDisplayXform` (279, 16, 150), eye cameras at -3.2 / +3.2 cm, `MoversePreset` set; nothing dirty. The editor's startup ensure about matrix precision and the LiveCoding errors for the NV_ACE DLLs also appear in the logs from before the pull.
+Not verified: nDisplay Launch after the pull; Step 7 lip sync on the lab PC.
+Left: lab PC tests of Steps 4 to 7 (keys `Saved/OpenAIKey.txt` and `Saved/GitLabToken.txt` still to create); Q27; how the lab changes get into the repo (Q19).
+Changed files on the lab PC (not committed): `Content/ExampleConfigs/NDC_Basic.uasset`, `Content/__ExternalActors__/DefaultMap/8/20/BYDHEQD265B040BKAIZ09D.uasset`, `README.md`; by the owner: `Content/NDC_HD_02.uasset`, new `Content/ExampleConfigs/NDC_BasicLED.uasset` and `Content/__ExternalActors__/DefaultMap/4/RZ/`. Not in Git: `CLAUDE.md`.
+
+### 2026-11-05 (Claude Code, lab PC): NDC_Basic output like NDC_BasicLED
+Done:
+- The owner reported that `NDC_BasicLED` (a new config they made, 4.2) shows 3D, while `NDC_Basic` showed only half the screen. The two configs were compared setting by setting in the editor. Differences: fullscreen, output remap, stereo mode, eye cameras, projection mesh, inner frustums.
+- `NDC_Basic` (Blueprint and placed actor): fullscreen on, output remap off, stereo mode Default on `VP_0` and `VP_1` (D49). Not changed: wall, Moverse tracking (`Rig`, `ViewPointL/R`, Blueprint graph), actor position, inner frustums (left off, see 4.3). Saved only `/Game/ExampleConfigs/NDC_Basic` and the actor package `__ExternalActors__/DefaultMap/8/20/BYDHEQD265B040BKAIZ09D`.
+- Not pulled: the lab PC is 7 commits behind GitHub and has uncommitted changes (the owner's `NDC_Basic`, `NDC_HD_02`, the new `NDC_BasicLED` and its actor), so the pull was left to the owner.
+Verified: after saving, both configs of `NDC_Basic` match `NDC_BasicLED` except the eye cameras, the projection mesh and the inner frustums; the actor's position and the wall and eye components are unchanged; no other package dirty.
+Not verified: the wall itself (no nDisplay Launch in this session); the 3D through the glasses.
+Left: owner tests `NDC_Basic` with nDisplay Launch; Q27. Backups of the two files before the change: `Saved/ClaudeTemp/Backup_2026-11-05_NDC_Basic/`.
+Changed files on the lab PC (not committed): `Content/ExampleConfigs/NDC_Basic.uasset`, `Content/__ExternalActors__/DefaultMap/8/20/BYDHEQD265B040BKAIZ09D.uasset`, `README.md`.
+
+### 2026-11-05 (Claude Code, lab PC): pull
+Done:
+- Pulled from GitHub: the lab PC moved from `8ea546d` to `be0e203` (13 commits: the merge of the 2026-10-21 lab changes, Steps 4 to 6, persona and voice).
+- Before the pull, the uncommitted lab changes of 2026-10-21 were discarded (owner's decision). Each file was compared with GitHub first: 5 identical; `Config/DefaultDisplayClusterLaunch.ini` differed only in line endings; `NDC_Basic.uasset` was the merged version (changed again since by Step 6); the `README.md` content is in the merged README (decisions renumbered, addresses removed); `CLAUDE.lab.md` was identical to the local `CLAUDE.md`. Nothing was lost.
+- `CLAUDE.md`: removed the note about uncommitted lab changes.
+Verified: working tree clean at `be0e203` before this entry; all LFS files downloaded (no pointer files left); `Plugins/MoversePlugin` still in place.
+Not verified: the editor with the new `MRLabLive` plugin; Steps 4 to 6 on the lab PC (the editor was not opened in this session).
+Left: create `Saved/OpenAIKey.txt` and `Saved/GitLabToken.txt` on the lab PC (both missing), then test Steps 4 to 6 with the lab microphone, speakers and real tracking (Q14). Earlier open items unchanged.
+Changed files on the lab PC (not committed): `README.md` (this entry). Not in Git: `CLAUDE.md`.
 
 ### 2026-11-05 (Claude Code, laptop): Frank sounds more human
 Done:
