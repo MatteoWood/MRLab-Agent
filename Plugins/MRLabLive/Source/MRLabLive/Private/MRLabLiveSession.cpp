@@ -1,6 +1,9 @@
 #include "MRLabLiveSession.h"
 
 #include "Async/Async.h"
+#include "Containers/Queue.h"
+#include "HAL/Event.h"
+#include <atomic>
 #include "AudioCapture.h"
 #include "AudioDefines.h"
 #include "Components/AudioComponent.h"
@@ -13,6 +16,10 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "Sound/SoundWaveProcedural.h"
+#include "GuiToRawControlsUtils.h"
+#include "NNEModelData.h"
+#include "SpeechAnimationSolverV4.h"
+#include "UObject/Package.h"
 
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <winhttp.h>
@@ -24,6 +31,11 @@ namespace
 {
 	// Default audio format of the Live API: audio/pcm, 24 kHz, mono, 16 bit.
 	constexpr int32 LiveSampleRate = 24000;
+
+	// Lip sync: the solver looks this far ahead into the voice to animate the current moment (80 to 240 ms).
+	constexpr int32 LookaheadMs = 80;
+	// The voice is held back by the lookahead plus a margin for solving, so each frame is ready before its sound plays.
+	constexpr int32 VoiceDelaySamples = (LookaheadMs + 40) * LiveSampleRate / 1000;
 
 	/** All .md files in Saved/Knowledge (written by the editor's Update Knowledge button), one section per file. */
 	FString LoadKnowledge()
@@ -180,6 +192,144 @@ private:
 	TSharedRef<bool> bAlive = MakeShared<bool>(true);
 };
 
+/**
+ * Epic's real-time speech-to-face solver (StreamingADA, as used by MetaHuman's audio Live Link source).
+ * Runs on its own thread, so solving never runs on the game thread. Frames is shared with the game
+ * thread under Lock.
+ */
+struct FLipSync
+{
+	explicit FLipSync(UNNEModelData* Model)
+		// GPU (DirectML), Epic's default: about 6 ms per 20 ms frame on the laptop; the CPU backend needed about 16 ms.
+		: Solver(Model, TEXT("NNERuntimeORTDml"))
+	{
+		Resampler.Init(Audio::EResamplingMethod::FastSinc, 16000.f / LiveSampleRate, 1);
+	}
+
+	~FLipSync()
+	{
+		FPlatformProcess::ReturnSynchEventToPool(Wake);
+	}
+
+	void Start()
+	{
+		Worker = Async(EAsyncExecution::Thread, [this]()
+		{
+			while (!bStop)
+			{
+				Wake->Wait(100);
+				TArray<float> Voice;
+				while (!bStop && Input.Dequeue(Voice))
+				{
+					Process(Voice);
+				}
+			}
+		});
+	}
+
+	void Stop()
+	{
+		bStop = true;
+		Wake->Trigger();
+		if (Worker.IsValid())
+		{
+			Worker.Wait();
+		}
+		if (SolveCount > 0)
+		{
+			UE_LOG(LogMRLabLive, Log, TEXT("Lip sync: %d frames solved, %.1f ms on average, %.1f ms at most"),
+				SolveCount, SolveSeconds / SolveCount * 1000.0, SolveMaxSeconds * 1000.0);
+		}
+	}
+
+	// Called from the game thread.
+	void Add(TArray<float>&& Voice)
+	{
+		Input.Enqueue(MoveTemp(Voice));
+		Wake->Trigger();
+	}
+
+	// Takes the next voice samples (24 kHz) and adds one frame of face controls per 20 ms.
+	void Process(TArray<float>& Voice)
+	{
+		TArray<float> Resampled;
+		Resampled.SetNumUninitialized(Voice.Num() * 2 / 3 + 16);
+		int32 OutFrames = 0;
+		Resampler.ProcessAudio(Voice.GetData(), Voice.Num(), false, Resampled.GetData(), Resampled.Num(), OutFrames);
+		Pending.Append(Resampled.GetData(), OutFrames);
+
+		int32 Used = 0;
+		while (Pending.Num() - Used >= 320)
+		{
+			FSpeechAnimationAudioFrame In;
+			In.AudioSamples = TArray<float>(Pending.GetData() + Used, 320);
+			In.SamplesCount = 320;
+			In.SampleRate = 16000;
+			In.NumChannels = 1;
+			In.bContiguous = bContiguous;
+			In.Mood = EAudioDrivenAnimationMood::AutoDetect;
+			In.Lookahead = LookaheadMs;
+			bContiguous = true;
+			Used += 320;
+			Solved += 320;
+
+			FSpeechAnimationFrameData Out;
+			const double SolveStart = FPlatformTime::Seconds();
+			const bool bSolved = Solver.SolveAudioFrame(In, Out);
+			const double SolveTime = FPlatformTime::Seconds() - SolveStart;
+			SolveSeconds += SolveTime;
+			SolveMaxSeconds = FMath::Max(SolveMaxSeconds, SolveTime);
+			++SolveCount;
+			if (!bSolved)
+			{
+				continue;
+			}
+			TMap<FString, float> Gui;
+			for (int32 Index = 0; Index < Out.CurveNames.Num(); ++Index)
+			{
+				Gui.Add(Out.CurveNames[Index].ToString(), Out.CurveValues[Index]);
+			}
+			const TMap<FString, float> Raw = GuiToRawControlsUtils::ConvertGuiToRawControls(Gui);
+
+			FScopeLock ScopeLock(&Lock);
+			if (Names.IsEmpty())
+			{
+				for (const TPair<FString, float>& Pair : Raw)
+				{
+					Names.Add(FName(Pair.Key));
+				}
+			}
+			TArray<float> Values;
+			for (const FName& Name : Names)
+			{
+				Values.Add(Raw.FindRef(Name.ToString()));
+			}
+			// The solver animates the moment one lookahead before the newest audio it has seen.
+			const int64 Sample = Solved * LiveSampleRate / 16000 - int64(LookaheadMs) * LiveSampleRate / 1000;
+			Frames.Emplace(Sample, MoveTemp(Values));
+		}
+		Pending.RemoveAt(0, Used);
+	}
+
+	FSpeechAnimationSolverV4 Solver;
+	Audio::FResampler Resampler;
+	TArray<float> Pending;     // 16 kHz samples not solved yet
+	int64 Solved = 0;          // 16 kHz samples solved so far
+	bool bContiguous = false;  // false resets the solver on the first frame
+	int32 SolveCount = 0;
+	double SolveSeconds = 0.0;
+	double SolveMaxSeconds = 0.0;
+
+	TQueue<TArray<float>, EQueueMode::Spsc> Input;
+	FEvent* Wake = FPlatformProcess::GetSynchEventFromPool(false);
+	std::atomic<bool> bStop = false;
+	TFuture<void> Worker;
+
+	FCriticalSection Lock;
+	TArray<FName> Names;                       // the 251 CTRL_expressions_* controls
+	TArray<TPair<int64, TArray<float>>> Frames; // voice sample index (24 kHz), control values
+};
+
 UMRLabLiveSession::UMRLabLiveSession()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -295,7 +445,7 @@ void UMRLabLiveSession::HandleMessage(const FString& Message)
 		FBase64::Decode(Event->GetStringField(TEXT("delta")), Pcm);
 		if (VoiceWave)
 		{
-			VoiceWave->QueueAudio(Pcm.GetData(), Pcm.Num());
+			QueueVoice(reinterpret_cast<const int16*>(Pcm.GetData()), Pcm.Num() / sizeof(int16));
 		}
 	}
 	else if (Type == TEXT("session.input_transcript.delta"))
@@ -325,6 +475,60 @@ void UMRLabLiveSession::HandleMessage(const FString& Message)
 	{
 		UE_LOG(LogMRLabLive, Log, TEXT("Event %s"), *Message.Left(300));
 	}
+}
+
+void UMRLabLiveSession::QueueVoice(const int16* Samples, int32 NumSamples)
+{
+	TArray<int16> Pcm;
+	if (VoiceWave->GetAvailableAudioByteCount() == 0)
+	{
+		// Start of the stream, or the voice ran dry: hold it back again by the lip sync delay.
+		Pcm.AddZeroed(VoiceDelaySamples);
+	}
+	Pcm.Append(Samples, NumSamples);
+	VoiceWave->QueueAudio(reinterpret_cast<const uint8*>(Pcm.GetData()), Pcm.Num() * sizeof(int16));
+	VoiceQueued += Pcm.Num();
+
+	if (LipSync.IsValid())
+	{
+		TArray<float> Floats;
+		Floats.SetNumUninitialized(Pcm.Num());
+		for (int32 Index = 0; Index < Pcm.Num(); ++Index)
+		{
+			Floats[Index] = Pcm[Index] / 32768.f;
+		}
+		LipSync->Add(MoveTemp(Floats));
+	}
+}
+
+void UMRLabLiveSession::UpdateLipSync()
+{
+	if (!LipSync.IsValid() || !VoiceWave)
+	{
+		return;
+	}
+	// The voice sample being played now: everything queued minus what is still waiting in the wave.
+	const int64 Playhead = VoiceQueued - VoiceWave->GetAvailableAudioByteCount() / sizeof(int16);
+
+	FScopeLock ScopeLock(&LipSync->Lock);
+	TArray<TPair<int64, TArray<float>>>& Frames = LipSync->Frames;
+	int32 Next = 0;
+	while (Next < Frames.Num() && Frames[Next].Key <= Playhead)
+	{
+		++Next;
+	}
+	if (Next == 0)
+	{
+		return; // nothing solved up to the playhead yet
+	}
+	const TPair<int64, TArray<float>>& A = Frames[Next - 1];
+	const TPair<int64, TArray<float>>* B = Next < Frames.Num() ? &Frames[Next] : nullptr;
+	const float Alpha = B ? float(Playhead - A.Key) / float(B->Key - A.Key) : 0.f;
+	for (int32 Index = 0; Index < LipSync->Names.Num(); ++Index)
+	{
+		LipSyncCurves.Add(LipSync->Names[Index], B ? FMath::Lerp(A.Value[Index], B->Value[Index], Alpha) : A.Value[Index]);
+	}
+	Frames.RemoveAt(0, Next - 1);
 }
 
 void UMRLabLiveSession::AddTranscript(bool bUser, const FString& Delta)
@@ -367,6 +571,23 @@ void UMRLabLiveSession::StartAudio()
 	VoiceWave->Duration = INDEFINITELY_LOOPING_DURATION;
 	VoiceWave->SoundGroup = SOUNDGROUP_Voice;
 	VoiceWave->bLooping = false;
+	VoiceQueued = 0;
+
+	UNNEModelData* SolverModel = LoadObject<UNNEModelData>(GetTransientPackage(), *ISpeechAnimationSolver::GetLatestModelAssetPath());
+	LipSyncModel = SolverModel;
+	if (SolverModel)
+	{
+		LipSync = MakeShared<FLipSync>(SolverModel);
+	}
+	if (!LipSync.IsValid() || !LipSync->Solver.Initialize())
+	{
+		UE_LOG(LogMRLabLive, Error, TEXT("Lip sync solver could not start; the agent speaks without lip sync"));
+		LipSync.Reset();
+	}
+	else
+	{
+		LipSync->Start();
+	}
 
 	Speaker = NewObject<UAudioComponent>(GetOwner());
 	Speaker->bAutoActivate = false;
@@ -408,6 +629,7 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	{
 		return;
 	}
+	UpdateLipSync();
 
 	TArray<int16> Pcm;
 	{
@@ -447,6 +669,13 @@ void UMRLabLiveSession::Shutdown(const FString& Reason)
 		Speaker = nullptr;
 	}
 	VoiceWave = nullptr;
+	if (LipSync.IsValid())
+	{
+		LipSync->Stop();
+		LipSync.Reset();
+	}
+	LipSyncModel = nullptr;
+	LipSyncCurves.Reset();
 
 	OldSocket->Close();
 	OnSessionClosed.Broadcast(Reason);

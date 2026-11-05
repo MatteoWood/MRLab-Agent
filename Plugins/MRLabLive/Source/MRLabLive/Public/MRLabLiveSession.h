@@ -7,6 +7,7 @@
 #include "MRLabLiveSession.generated.h"
 
 class FLiveSocket;
+struct FLipSync;
 class FJsonObject;
 class UAudioCapture;
 class UAudioComponent;
@@ -19,6 +20,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FMRLabLiveText, const FString&, Text
  * Streams the default microphone to the model and plays the agent's voice from the owning actor.
  * The API key is read from Saved/OpenAIKey.txt (one line, not in Git).
  * At session start, every .md file in Saved/Knowledge is appended to the instructions as lab knowledge.
+ * Lip sync: the voice runs through Epic's real-time speech-to-face solver; LipSyncCurves holds the
+ * MetaHuman face controls (CTRL_expressions_*) for the sample being heard now. The voice is delayed
+ * slightly so the solver's lookahead is available before each sample plays.
  */
 UCLASS(ClassGroup = (MRLab), meta = (BlueprintSpawnableComponent))
 class MRLABLIVE_API UMRLabLiveSession : public UActorComponent
@@ -49,6 +53,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "MRLab Live")
 	FMRLabLiveText OnSessionClosed;
 
+	/** Face controls for the voice sample being heard now. Empty until the first answer. */
+	UPROPERTY(BlueprintReadOnly, Category = "MRLab Live")
+	TMap<FName, float> LipSyncCurves;
+
 	UFUNCTION(BlueprintCallable, Category = "MRLab Live")
 	void StartSession();
 
@@ -64,6 +72,8 @@ private:
 	void StartAudio();
 	void Shutdown(const FString& Reason);
 	void AddTranscript(bool bUser, const FString& Delta);
+	void QueueVoice(const int16* Samples, int32 NumSamples);
+	void UpdateLipSync();
 
 	// Runs on the audio capture thread.
 	void OnMicAudio(const float* Samples, int32 NumSamples);
@@ -90,6 +100,16 @@ private:
 	// 24 kHz mono PCM16 waiting to be sent, filled on the audio thread.
 	FCriticalSection MicLock;
 	TArray<int16> MicPcm;
+
+	// Solver model asset, kept here so it is not garbage collected while the solver uses it.
+	UPROPERTY()
+	TObjectPtr<UObject> LipSyncModel;
+
+	// Solver and its thread; the game thread reads its frames under its lock.
+	TSharedPtr<FLipSync> LipSync;
+
+	// Voice samples queued into VoiceWave so far, including inserted delay silence.
+	int64 VoiceQueued = 0;
 
 	FString UserText;
 	FString AgentText;

@@ -7,7 +7,7 @@ public class MRLabLive : ModuleRules
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "AudioMixer", "AudioPlatformConfiguration" });
-		PrivateDependencyModuleNames.AddRange(new string[] { "AudioCapture", "AudioMixerCore", "Json" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "AudioCapture", "AudioMixerCore", "Json", "SpeechAnimationSolver", "MetaHumanCoreTech", "NNE" });
 		PublicSystemLibraries.Add("winhttp.lib");
 	}
 }

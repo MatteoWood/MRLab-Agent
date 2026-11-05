@@ -21,6 +21,10 @@
 		{
 			"Name": "AudioCapture",
 			"Enabled": true
+		},
+		{
+			"Name": "MetaHumanCoreTech",
+			"Enabled": true
 		}
 	]
 }
