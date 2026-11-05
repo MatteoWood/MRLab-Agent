@@ -80,7 +80,7 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 
 ## 4. Current state
 
-State on 2026-10-27: the lab PC changes of 2026-10-21 are now in the repo (section 8). On the lab PC the wall runs head-tracked stereo 3D with live Moverse tracking (verified by the owner on 2026-10-21). On the laptop the agent holds a spoken English conversation through gpt-live-1 (4.8) and answers lab questions from the GitLab knowledge base (4.9); neither is tested on the lab PC yet.
+State on 2026-11-05: on the lab PC the wall runs head-tracked stereo 3D with live Moverse tracking (verified by the owner on 2026-10-21). On the laptop the agent holds a spoken English conversation through gpt-live-1 (4.8), answers lab questions from the GitLab knowledge base (4.9) and follows the tracked user with its eyes and head (4.10); none of these three is tested on the lab PC yet.
 
 ### 4.1 Project setup
 - No project `Source/` folder. C++ lives in the project plugin `Plugins/MRLabLive` (4.8, D25). Building it also makes the build tool generate a stub project module and `Binaries/Win64/MRLabProject58Editor.target`; both are ignored by Git and not needed to run.
@@ -132,6 +132,8 @@ Details of `NDC_Basic`:
 - Live Link preset `/Game/Tracking/LiveLinkMoverseMRLab`: Moverse source (Tracking PC address in the local `CLAUDE.md`), subject `Actor0` (animation role). It also contains an Apple ARKit Live Link source from the lab project. The lab PC did not change it (byte-identical in the lab copy of 2026-10-21). It must not be re-saved in an editor session without the Moverse plugin loaded, or the Moverse source is lost.
 - `NDC_Basic` BeginPlay calls `ApplyToClient` on its variable `MoversePreset` (default: the preset above), so the Moverse source is set up at start. In the lab this was done by the level Blueprint (decision D9).
 - Head tracking in `NDC_Basic`: on `OnLiveLinkUpdated` of its `LiveLinkComponentController`, it reads bone `moverserig_Head` of subject `Actor0`, converts the location (x, y, z) to (z, -x, -y), and sets it as the relative location of `Rig`. The eye cameras follow `Rig`. A PrintString logs the position every frame ("INVALID" while no frame arrives); in nDisplay nodes it only goes to `Saved/Logs/Node_0.log`.
+- Variable `bHeadTracked` on `NDC_Basic` (2026-11-05, for gaze): on the valid path it is true while subject `Actor0` is `Connected` (`GetLiveLinkSubjectState`), on the `Invalid Frame` path false. Live Link keeps returning the last frame after the data stops, so the frame alone does not tell; the subject turns `Unresponsive` after `TimeWithoutFrameToBeConsiderAsInvalid` (0.5 s, `DefaultGame.ini`).
+- Laptop observation (2026-11-05): with tracking data flowing, starting Play a second time in the same editor session crashed the editor inside the Moverse plugin (`FMoversePluginSource::HandleReceivedData`, access violation; most likely the receive thread of the replaced source keeps running after the source is deleted). One Play per editor start, or starting the data after Play, avoided it. Not seen on the lab PC so far (Q26).
 - Only one process on the PC receives the Moverse data (UDP). If the editor has applied the preset (for example after PIE with the plugin loaded), clear it with the console command `LiveLink.Preset.Clear` before launching nDisplay.
 - Calibration (2026-10-21, D21): the owner stood with the head about 50 cm in front of the middle of the wall, then stepped 2 m straight back. Measured head positions: (259, 16, 155) and (58.5, 2, 159); distance 200.5 cm, so units and direction are right. Middle of the wall surface in tracking space: (309, 16). The `NDC_Basic` origin is the tracking origin; the wall is placed at the measured position. Not applied: the offset from the head bone to the eyes (about 8 cm forward), and a possible small rotation (Y changed by 14 cm over the 2 m step, which may also be the step not being straight) (Q23).
 - `/Game/Actor0/`: Moverse rig skeletal mesh (`asset`), skeleton, physics asset and AnimBlueprint (`asset_Animation`). Bones are named `moverserig_*`.
@@ -146,7 +148,8 @@ Details of `NDC_Basic`:
 - Event graph: BeginPlay enables input for player controller 0. OnAnimInitialized (Face, Body) runs the standard MetaHuman `LiveLinkSetup`. A keyboard event `T` exists; when read as text it showed no attached nodes (not confirmed in the Blueprint editor).
 - Test audio: `/Game/Audio/test_audio`.
 - Component `LiveSession` (`MRLabLiveSession`, 4.8). BeginPlay (after EnableInput) calls `StartSession`. `OnUserTranscript` and `OnAgentTranscript` go to PrintString with keys `User` / `Agent`, so each side shows one growing line on screen (hidden in nDisplay nodes by `DisableAllScreenMessages`) and in the log.
-- No RAG, tracking-driven behaviour, vision or UI yet.
+- Gaze (4.10): functions `InitGaze` (called after `StartSession` at BeginPlay) and `UpdateGaze` (called from Event Tick); variables `NDC`, `HeadTarget`, `EyeTarget`.
+- No vision or UI yet.
 - On 2026-10-21 the editor showed `BP_Agent` as modified but unsaved, without anyone editing it in that session. It was left unsaved.
 
 ### 4.6 Tooling for AI agents
@@ -177,6 +180,15 @@ Described in each machine's local `CLAUDE.md`: UE's built-in MCP server (`.mcp.j
 - Knowledge repo on 2026-10-27: branch `main`, one file `Moverse-Tracking-System_Kopie.md` (about 800 tokens), commit `e8003aeb`.
 - Tested on the laptop (2026-10-27): the update downloads that file and the commit matches the repo; with a recorded question in Play-In-Editor the agent answered "Eight Luxonis OAK-D Pro W PoE cameras" (from the file) and "That I don't know" for a question the knowledge does not cover. The button appears on the toolbar; its command ran through Python remote execution, where the editor suppresses the message box, so the box itself has not been seen yet.
 
+### 4.10 Gaze
+- Target (D34): the head of Moverse subject `Actor0`, i.e. world location of `NDC_Basic`'s `Rig`, while `bHeadTracked` (4.4). Otherwise a point 3 m straight out of the face at 172 cm height (the face looks along the actor's right vector, +X in the level), so the agent eases back to straight ahead (D36).
+- `BP_Agent.UpdateGaze`: smooths the target with `VInterpTo`, speed 15 for the eyes and 3 for the head, so the eyes lead and the head follows. Writes `HeadTarget` to the body post-process instance and four eye curve values to the face post-process instance.
+- Head and neck (D35, D37): `/Game/MetaHumans/Agent/ABP_Agent_Body_PostProcess`, a copy of the MetaHuman `ABP_Body_PostProcess`, set as post-process AnimBP of `SKM_Agent_BodyMesh`. At its start: Local to Component, `Look At` on `neck_02` (alpha 0.3), `Look At` on `head` (alpha 0.6), both with forward axis local +Y, up axis local +X, clamp 45 degrees, target `HeadTarget` in world space; then Component to Local and the original chain. Together the head turns about 70 % of the way. The face copies the body pose, so the face turns with it.
+- Eyes (D35, D37): `/Game/MetaHumans/Agent/ABP_Agent_Face_PostProcess`, a copy of `ABP_Face_PostProcess`, set on `SKM_Agent_FaceMesh`. A `Modify Curve` node (Blend, alpha 1) before RigLogic sets `CTRL_expressions_eyeLook{Left,Right,Up,Down}{L,R}` from the variables `EyeLookLeft/Right/Up/Down` (same value for both eyes), so RigLogic moves eyes and lids. `UpdateGaze` computes the eye target direction in the head bone's space (X up, Y forward, Z to the agent's right) and divides by the measured eye rotation per curve unit: 40 degrees sideways (37.5 / 42.3 for the two eyes), 29.7 up, 39.9 down; clamped to 0..1.
+- The MetaHuman `Common` AnimBPs are unchanged; only the agent's own meshes point to the copies.
+- Tested on the laptop (2026-11-05) with fake Moverse data (head moving 2 m to each side and 0.8 m forward/back, 4 to 5 m from the agent): eye direction within 0.4 to 3.2 degrees of the user's head; head turning about two thirds of the angle with a small lag; after the data stops, `bHeadTracked` turns false and head and eyes are back to straight ahead (0 degrees) within about 3 s. Screenshots from the user's line of sight show the face turned to the viewer when tracked and turned away when not (not in Git). The conversation session still starts.
+- Not tested: real Moverse, the wall, the nDisplay node (its config file had to be regenerated by nDisplay Launch, which was not used), how natural it looks to a person. Known limits: the head-bone-to-eye offset of the user (Q23) is not applied (about 1 to 1.5 degrees at 3 to 5 m); both eyes get the same rotation (no convergence); the face is dark under the current lighting (Q22).
+
 ## 5. Roadmap
 
 Generic steps. A precise plan is written and agreed before each step starts (section 2). The order of Steps 3 to 7 is not decided. Step 8 is fixed as the last step.
@@ -203,11 +215,10 @@ Generic steps. A precise plan is written and agreed before each step starts (sec
 - Result: "Update Knowledge" editor button downloads the repo into `Saved/Knowledge/`; every session puts all local files into the agent's instructions (4.9, D30 to D33).
 - Remaining: lab PC (token file, access to GitLab from its network, Q14); switch approach when the knowledge outgrows the instruction limit (4.9).
 
-### Step 6. Gaze following: TODO
+### Step 6. Gaze following: DONE on the laptop (2026-11-05), lab PC test pending
 - Goal: the agent follows the user with its gaze using Moverse (G4).
-- Known inputs: Moverse subject `Actor0`, head bone `moverserig_Head`, axis conversion used in `NDC_Basic` (4.4). The `NDC_Basic` origin is the calibrated tracking origin, so the user's head in world space is the `NDC_Basic` transform applied to the `Rig` location. Up to 4 tracked users (3.1).
-- Open: Q15.
-- Detailed plan: not written yet.
+- Result: eyes aim at the head-tracked user, head and neck turn part of the way, back to straight ahead when nobody is tracked (4.10, D34 to D37).
+- Remaining: test on the wall with real tracking; Q26; eye offset (Q23).
 
 ### Step 7. Vision: TODO
 - Goal: the agent can see the user through the frontal camera on top of the wall and answer questions about appearance and pose (G5).
@@ -250,7 +261,8 @@ Knowledge base:
 - **Q14.** Access to the knowledge repo from the lab PC: credentials answered (token file, D32); network access from the lab PC to `gitlab.tuwien.ac.at` not tested.
 
 Tracking and vision:
-- **Q15.** Which tracked user the agent looks at when several are present.
+- **Q15.** ANSWERED 2026-11-05: the head-tracked user, subject `Actor0` (D34).
+- **Q26.** Moverse plugin crash on the laptop when Play starts again in the same editor session while tracking data flows (4.4). Fix the plugin source (it is in `Plugins/MoversePlugin`, not in Git), ask Moverse, or keep working around it? Check whether the lab PC's build shows the same.
 - **Q16.** Frontal camera: device model, how it connects, and how Unreal or the agent reads its frames.
 - **Q17.** Pose questions: answer from camera images, from Moverse skeleton data, or both?
 
@@ -297,10 +309,23 @@ Process:
 | D31 | 2026-10-27 | Knowledge update by hand with an "Update Knowledge" button in the editor toolbar (not needed in the final app); it downloads from GitLab into a local copy, and the agent only uses the local copy. Answers Q13. | Owner |
 | D32 | 2026-10-27 | GitLab access through a read-only token in `Saved/GitLabToken.txt` on each machine. | Owner |
 | D33 | 2026-10-27 | Local knowledge copy in `Saved/Knowledge/` (ignored by Git, because the knowledge repo is private and this repo is public). Button written in the editor's Python (no C++ for an editor-only tool). | Claude |
+| D34 | 2026-11-05 | The agent looks at the head-tracked user, Moverse subject `Actor0`. Answers Q15. | Owner |
+| D35 | 2026-11-05 | Gaze uses eyes and head: eyes aim at the user, head and neck turn part of the way, body unchanged. | Owner |
+| D36 | 2026-11-05 | When nobody is tracked the agent eases back to looking straight ahead. | Owner |
+| D37 | 2026-11-05 | Gaze implemented in agent-specific copies of the MetaHuman post-process AnimBPs (`Common` assets untouched) plus a `bHeadTracked` flag in `NDC_Basic` based on the Live Link subject state. | Claude |
 
 ## 8. Work log
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
+
+### 2026-11-05 (Claude Code, laptop): Step 6, gaze following
+Done:
+- Owner chose Step 6 and decided Q15 and the gaze behaviour (D34 to D36).
+- `NDC_Basic`: `bHeadTracked` flag (4.4). Agent copies of the body and face post-process AnimBPs with head/neck Look At and eye curves, assigned to the agent's meshes; `BP_Agent` functions `InitGaze` / `UpdateGaze` (4.5, 4.10). Eye curves calibrated in Play.
+- Found that Live Link keeps the last frame after the data stops; the flag therefore uses the subject state.
+Verified on the laptop: see 4.10 (fake Moverse data, Play and Simulate). The conversation session still starts.
+Not verified: real tracking, the wall, the nDisplay node, a person's impression.
+Left: Q26 (Moverse plugin crash on repeated Play with data flowing, laptop); lab PC tests of Steps 4 to 6; Q22 to Q25 and earlier open items unchanged.
 
 ### 2026-10-27 (Claude Code, laptop): Step 5, lab knowledge
 Done:
