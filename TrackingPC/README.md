@@ -8,7 +8,7 @@ the people in front of the wall for Frank. Main README: section 4.12 (vision) an
 | Part | Where | Changes |
 |---|---|---|
 | Code: `MRLabHub.exe`, `hub\`, `launcher\`, scripts | Git (this folder) | often; copy the new files over the old ones |
-| `runtime\`: portable Python with its packages, Ollama, the vision model, the tracking model for the OAK (`oak_models\`), the lab defaults (`defaults.json`: Unreal PC address and Moverse port); about 6.7 GB | USB stick, not in Git | once |
+| `runtime\`: portable Python with its packages (incl. ONNX Runtime), Ollama, the vision model, the tracking model (`pc_models\yolo11n-pose.onnx`), the lab defaults (`defaults.json`: Unreal PC address and Moverse port); about 6.8 GB | USB stick, not in Git | once |
 
 The hub only runs when both are together: `runtime\` must sit next to `MRLabHub.exe`.
 To build `runtime\` again (on a PC with internet): `2_setup.bat` downloads everything into it.
@@ -37,10 +37,11 @@ To build `runtime\` again (on a PC with internet): `2_setup.bat` downloads every
    - **Tracking** (first version, never tested with an OAK): the Unreal PC's address and the Moverse
      port are filled in from `runtime\defaults.json` (the values Moverse uses). Enter the frontal camera's
      position and tilt in tracking space (measure them; the defaults are a guess). Press **Start
-     tracking**: the pose model on the frontal camera's chip (YOLOv8 nano pose with the camera's depth)
-     finds the people; the followed person gets a box and a green dot between the eyes, X/Y/Z show the
-     head position, and `NDC_Basic` on the Unreal PC moves the view as with Moverse. The info line says
-     "distance from pose model and depth on the camera". Moverse must not run at the same time.
+     tracking**: the hub times the pose model (YOLO11 nano pose) on this PC's graphics card and processor
+     (about 5 s) and uses the faster; the info line shows which and how many ms per frame. The camera
+     only sends colour and depth. The followed person gets a box and a green dot between the eyes, X/Y/Z
+     show the head position ("distance from camera depth"), and `NDC_Basic` on the Unreal PC moves the
+     view as with Moverse. Moverse must not run at the same time.
 5. Copy the **Log** (Vision page) to Claude when something does not work.
 6. Close the hub window (it also stops its Ollama). Start Moverse again if needed.
 
@@ -56,8 +57,9 @@ To build `runtime\` again (on a PC with internet): `2_setup.bat` downloads every
 |---|---|
 | `MRLabHub.exe` | Starts the hub (`launcher\MRLabHub.cs`, built by `launcher\build.bat` with the C# compiler that is part of Windows) |
 | `hub\app.py` | The window: Cameras, Tracking, Vision |
-| `hub\cameras.py` | Search, connect, stream (frontal camera: colour 1280x720 and the pose model with depth on its chip; others: small preview) |
-| `hub\tracking.py` | Head tracker: head point (from the camera's pose model, or the PC's face detector), tracking space, smoothing, Moverse packets |
+| `hub\cameras.py` | Search, connect, stream (frontal camera: colour 960x540 at 30 fps and depth aligned to it; others: small preview); no model runs on the cameras |
+| `hub\pose.py` | YOLO11 nano pose on this PC (ONNX Runtime; graphics card or processor, whichever is faster) |
+| `hub\tracking.py` | Head tracker: head point and its distance, tracking space, smoothing, Moverse packets |
 | `hub\vision.py` | Description of the people with the local model, sent to Unreal |
 | `hub\ollama.py` | Starts and stops the hub's own Ollama |
 | `mrlab_camera_service.py` | Vision without a window (also for the laptop: `--source webcam`) |

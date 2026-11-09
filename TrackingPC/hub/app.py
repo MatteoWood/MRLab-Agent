@@ -594,7 +594,8 @@ class Hub(QMainWindow):
         self.track_values["Rate"].setText(f"{tracker.rate:.0f}" if tracker else "-")
         if tracker:
             seen = f"head found, distance from {tracker.distance_from}" if tracker.head else "nobody found"
-            self.track_info.setText(f"{seen}  |  {tracker.sent} packets sent to {self.settings['unreal_address']}:{self.settings['moverse_port']}")
+            self.track_info.setText(f"{seen}  |  {tracker.status}  |  {tracker.sent} packets sent to "
+                                    f"{self.settings['unreal_address']}:{self.settings['moverse_port']}")
         else:
             self.track_info.setText("Stopped. Moverse must not run at the same time (both would send to the same port).")
         self.track_button.setText("Stop tracking" if tracker else "Start tracking")

@@ -33,8 +33,14 @@ $OllamaAddress = '127.0.0.1:11435'  # its own port, so an Ollama installed on th
 $Settings = Join-Path $Here 'mrlab_camera_service.local.json'
 
 $PythonUrl = 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip'
-$Wheels = @(@('numpy', '2.2.6'), @('opencv-python', '4.12.0.88'), @('depthai', '3.12.0'), @('shiboken6', '6.12.0'), @('PySide6-Essentials', '6.12.0'))
+$Wheels = @(@('numpy', '2.2.6'), @('opencv-python', '4.12.0.88'), @('depthai', '3.12.0'), @('shiboken6', '6.12.0'), @('PySide6-Essentials', '6.12.0'),
+    # ONNX runtime with DirectML (runs the pose model on the graphics card, else on the processor) and its helpers
+    @('flatbuffers', '25.12.19'), @('packaging', '26.3'), @('protobuf', '7.36.2'), @('mpmath', '1.4.1'), @('sympy', '1.14.0'), @('onnxruntime-directml', '1.24.4'))
 $OllamaVersion = 'v0.40.15'
+# Pose model for tracking (Ultralytics YOLO11 nano pose, AGPL-3.0), with the checksum GitHub publishes for it
+$PoseUrl = 'https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-pose.onnx'
+$PoseSha256 = '93e2866b0ce678f99b4dd88af0c12e9ea2edf079a361dc2ecbc6226b77ff6408'
+$PoseModel = Join-Path $Runtime 'pc_models\yolo11n-pose.onnx'
 
 function Title($Text) { Write-Host "`n== $Text" -ForegroundColor Cyan }
 
@@ -141,6 +147,7 @@ switch ($Action) {
         "Python:       $(if (Test-Path $Python) { 'ready' } else { 'missing (run 2_setup.bat)' })"
         "Ollama:       $(if (Get-Ollama) { 'ready' } else { 'missing (run 2_setup.bat)' })"
         "Vision model: $(if (Test-Path $ModelManifest) { 'ready' } else { 'missing (run 2_setup.bat)' })"
+        "Pose model:   $(if (Test-Path $PoseModel) { 'ready' } else { 'missing (run 2_setup.bat)' })"
         "Settings:     $(if (Test-Path $Settings) { Get-Content $Settings -Raw } else { 'not set yet (4_run.bat asks for them)' })"
     }
 
@@ -164,7 +171,9 @@ switch ($Action) {
             Title "$name $version"
             if (Test-Path (Join-Path $SitePackages "$($name -replace '-', '_')-$version.dist-info")) { 'ready'; continue }
             $release = (& curl.exe --silent --fail "https://pypi.org/pypi/$name/$version/json") | Out-String | ConvertFrom-Json
-            $file = $release.urls | Where-Object { $_.filename -like '*win_amd64.whl' -and ($_.filename -like '*cp311*' -or $_.filename -like '*abi3*') } | Select-Object -First 1
+            $file = $release.urls | Where-Object {
+                ($_.filename -like '*win_amd64.whl' -and ($_.filename -like '*cp311*' -or $_.filename -like '*abi3*')) -or $_.filename -like '*-none-any.whl'
+            } | Select-Object -First 1
             if (-not $file) { throw "No Windows package of $name $version for Python 3.11" }
             $path = Join-Path $Downloads $file.filename
             Get-File $file.url $path
@@ -174,6 +183,15 @@ switch ($Action) {
             Remove-Item $path
             'ready'
         }
+
+        Title 'Pose model for tracking: YOLO11 nano pose (12 MB)'
+        if (-not (Test-Path $PoseModel)) {
+            New-Item -ItemType Directory -Force (Split-Path $PoseModel) | Out-Null
+            Get-File $PoseUrl "$PoseModel.part"
+            if ((Get-FileHash "$PoseModel.part" -Algorithm SHA256).Hash -ne $PoseSha256) { throw 'Checksum of the pose model does not match' }
+            Move-Item "$PoseModel.part" $PoseModel
+        }
+        'ready'
 
         Title "Ollama $OllamaVersion (portable, 1.6 GB download, 3.2 GB unpacked)"
         if (-not (Get-Ollama)) {
@@ -199,7 +217,7 @@ switch ($Action) {
         'ready'
 
         Title 'Check that the Python packages load'
-        & $Python -c "import numpy, cv2, depthai, PySide6; print('numpy', numpy.__version__, '| opencv', cv2.__version__, '| depthai', depthai.__version__, '| PySide6', PySide6.__version__)"
+        & $Python -c "import numpy, cv2, depthai, PySide6, onnxruntime as o; print('numpy', numpy.__version__, '| opencv', cv2.__version__, '| depthai', depthai.__version__, '| PySide6', PySide6.__version__, '| onnxruntime', o.__version__, o.get_available_providers())"
         if ($LASTEXITCODE -ne 0) { throw 'The Python packages do not load' }
         Title 'Setup done'
     }

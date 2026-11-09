@@ -1,14 +1,15 @@
 """Fast head tracker (Step 8B, first version, not tested with an OAK camera yet).
 
-With an OAK as frontal camera, the head points come from the pose model running on the camera's own chip
-(YOLOv8 nano pose with stereo depth, see cameras.py): the middle of the eyes in camera space, at up to
-30 per second. Without it (webcam test, or the model file missing) the PC finds the face in the colour
-frames with OpenCV's built-in Haar cascade and estimates the distance from the face width (a face is
-about FACE_WIDTH_MM wide). The point in camera space is moved into the tracking space NDC_Basic uses (cm; X towards the wall, Y to the right
-seen facing the wall, Z height above the floor) with the camera pose from the settings, smoothed with a
-One Euro filter, and sent to the Unreal PC in Moverse's packet format (subject Actor0, 25 moverserig
-bones, head at the point), so the Moverse Live Link plugin, NDC_Basic and the gaze work unchanged.
-When no face is seen for LOST_AFTER seconds nothing is sent, so the subject turns Unresponsive.
+The frontal camera only delivers pictures: colour, and stereo depth aligned to the colour picture.
+Everything else runs here on the tracking PC: the pose model (YOLO11 nano pose, hub/pose.py, on the
+graphics card or the processor, whichever is faster) finds the people and their body points; the head
+point is the middle of the eyes (else the nose, else the ears); its distance is the median depth around
+that point, or, without depth (webcam test), estimated from the eye distance (about EYE_DISTANCE_MM).
+The point in camera space is moved into the tracking space NDC_Basic uses (cm; X towards the wall, Y to
+the right seen facing the wall, Z height above the floor) with the camera pose from the settings,
+smoothed with a One Euro filter, and sent to the Unreal PC in Moverse's packet format (subject Actor0,
+25 moverserig bones, head at the point), so the Moverse Live Link plugin, NDC_Basic and the gaze work
+unchanged. When nobody is seen for LOST_AFTER seconds nothing is sent, so the subject turns Unresponsive.
 Moverse must not run at the same time (two senders on one port).
 """
 import json
@@ -17,10 +18,12 @@ import socket
 import threading
 import time
 
-import cv2
 import numpy as np
 
-FACE_WIDTH_MM = 160.0
+from hub import pose
+
+EYE_DISTANCE_MM = 63.0
+MIN_POINT_CONFIDENCE = 0.5
 LOST_AFTER = 0.5
 SUBJECT = "Actor0"
 
@@ -125,25 +128,18 @@ class OneEuro:
 
 
 class FrontalFrames:
-    """Newest colour frame of the frontal camera with its intrinsics, and the head points of its pose model."""
+    """Newest colour frame of the frontal camera, its depth and the colour camera's intrinsics."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.color = None  # (BGR image, capture time)
-        self.depth = None  # uint16 depth in mm aligned to the colour image, or None
+        self.depth = None  # uint16 depth in mm aligned to the colour image (any size, same aspect), or None
         self.intrinsics = None  # (fx, fy, cx, cy) at the colour image size
         self.seq = 0
-        self.people = None  # head points from the camera's pose model (cameras.heads), None without it
-        self.people_time = 0.0
-        self.people_seq = 0
 
     def publish(self, color, captured, depth=None):
         with self.lock:
             self.color, self.depth, self.seq = (color, captured), depth, self.seq + 1
-
-    def publish_people(self, people, captured):
-        with self.lock:
-            self.people, self.people_time, self.people_seq = people, captured, self.people_seq + 1
 
 
 class Tracker(threading.Thread):
@@ -151,9 +147,10 @@ class Tracker(threading.Thread):
         super().__init__(daemon=True)
         self.frames, self.settings, self.log = frames, settings, log
         self.running = True
-        self.detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        self.model = None
         # Shown in the window:
-        self.box = None        # tracked person or face, (x0, y0, x1, y1) as fractions of the colour image
+        self.status = "loading the pose model"
+        self.box = None        # followed person, (x0, y0, x1, y1) as fractions of the colour image
         self.head = None       # head point, (u, v) as fractions of the colour image
         self.position = None   # filtered head position in tracking space (cm)
         self.distance_from = ""  # how the distance was found
@@ -162,6 +159,13 @@ class Tracker(threading.Thread):
         self.sent = 0
 
     def run(self):
+        try:
+            self.model = pose.PoseModel(self.log)
+        except Exception as error:  # model file or runtime missing: shown in the window and the log
+            self.status = f"pose model not available: {error}"
+            self.log(self.status)
+            return
+        self.status = f"pose model on the {self.model.device}, {self.model.ms:.0f} ms per frame"
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s = self.settings
         address = (s["unreal_address"], int(s["moverse_port"]))
@@ -172,21 +176,13 @@ class Tracker(threading.Thread):
         last_seq, last_seen, last_subject, times = 0, 0.0, 0.0, []
         while self.running:
             with self.frames.lock:
-                f = self.frames
-                if f.people is not None:  # pose model on the camera
-                    seq, people, captured = f.people_seq, f.people, f.people_time
-                else:  # face detector on this PC
-                    seq, color, depth, intrinsics = f.seq, f.color, f.depth, f.intrinsics
-                    people = None
-            if seq == last_seq or (people is None and (color is None or intrinsics is None)):
-                time.sleep(0.003)
+                seq, color, depth, intrinsics = self.frames.seq, self.frames.color, self.frames.depth, self.frames.intrinsics
+            if seq == last_seq or color is None or intrinsics is None:
+                time.sleep(0.002)
                 continue
-            last_seq = seq
-            if people is not None:
-                point = self.choose(people)
-            else:
-                image, captured = color
-                point = self.locate(image, depth, intrinsics)
+            last_seq = seq  # the newest frame only: frames that came while the model ran are skipped
+            image, captured = color
+            point = self.locate(image, depth, intrinsics)
             now = time.monotonic()
             if point is None:
                 if now - last_seen > LOST_AFTER:
@@ -208,44 +204,52 @@ class Tracker(threading.Thread):
                 self.log(f"tracking: send failed: {error}")
                 time.sleep(0.5)
 
-    def choose(self, people):
-        """Head point (camera space, mm) of the person followed: the one closest to the last head point
-        (within 50 cm), else the one nearest to the camera."""
-        if not people:
-            return None
-        person = None
-        if self.last_point is not None:
-            near = min(people, key=lambda p: np.linalg.norm(p["point"] - self.last_point))
-            if np.linalg.norm(near["point"] - self.last_point) < 500:
-                person = near
-        if person is None:
-            person = min(people, key=lambda p: p["point"][2])
-        self.last_point = person["point"]
-        self.box, self.head = person["box"], person["head"]
-        self.distance_from = "pose model and depth on the camera"
-        return person["point"]
-
     def locate(self, image, depth, intrinsics):
-        """Point between the eyes of the largest face, in camera space (mm), or None."""
-        grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        faces = self.detector.detectMultiScale(grey, scaleFactor=1.1, minNeighbors=5, minSize=(20, 20))
-        if len(faces) == 0:
-            return None
-        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-        width, height = image.shape[1], image.shape[0]
+        """Head point (camera space, mm; x right, y down, z forward) of the person followed, or None.
+
+        Followed: the person whose head is closest to the last head point (within 50 cm), else the
+        person nearest to the camera."""
+        h, w = image.shape[:2]
         fx, fy, cx, cy = intrinsics
-        u, v = x + w / 2.0, y + 0.4 * h  # the eyes sit a bit above the middle of the face box
-        self.box = (x / width, y / height, (x + w) / width, (y + h) / height)
-        self.head = (u / width, v / height)
-        z = None
-        if depth is not None:
-            sx, sy = depth.shape[1] / image.shape[1], depth.shape[0] / image.shape[0]
-            patch = depth[int((y + 0.25 * h) * sy):int((y + 0.75 * h) * sy), int((x + 0.25 * w) * sx):int((x + 0.75 * w) * sx)]
-            valid = patch[patch > 0]
-            if valid.size > 10:
-                z = float(np.median(valid))
-                self.distance_from = "depth"
-        if z is None:
-            z = fx * FACE_WIDTH_MM / w
-            self.distance_from = "face size"
-        return np.array([(u - cx) * z / fx, (v - cy) * z / fy, z])
+        heads = []
+        for person in self.model(image):
+            points = person["points"]
+
+            def good(i):
+                return points[i, 2] >= MIN_POINT_CONFIDENCE
+
+            for group in ((pose.LEFT_EYE, pose.RIGHT_EYE), (pose.NOSE,), (pose.LEFT_EAR, pose.RIGHT_EAR)):
+                if all(good(i) for i in group):
+                    u, v = points[list(group), :2].mean(0)
+                    break
+            else:
+                continue  # head not seen
+            z, source = None, ""
+            if depth is not None:
+                sx, sy = depth.shape[1] / w, depth.shape[0] / h
+                du, dv, r = int(u * sx), int(v * sy), max(2, int(6 * sx))
+                patch = depth[max(0, dv - r):dv + r + 1, max(0, du - r):du + r + 1]
+                valid = patch[patch > 0]
+                if valid.size >= 5:
+                    z, source = float(np.median(valid)), "camera depth"
+            if z is None and good(pose.LEFT_EYE) and good(pose.RIGHT_EYE):
+                eyes = np.linalg.norm(points[pose.LEFT_EYE, :2] - points[pose.RIGHT_EYE, :2])
+                if eyes > 2:
+                    z, source = fx * EYE_DISTANCE_MM / eyes, "eye distance"
+            if z is None:
+                continue
+            heads.append((np.array([(u - cx) * z / fx, (v - cy) * z / fy, z]), person["box"], (u, v), source))
+        if not heads:
+            return None
+        chosen = None
+        if self.last_point is not None:
+            near = min(heads, key=lambda c: np.linalg.norm(c[0] - self.last_point))
+            if np.linalg.norm(near[0] - self.last_point) < 500:
+                chosen = near
+        if chosen is None:
+            chosen = min(heads, key=lambda c: c[0][2])
+        point, box, (u, v), self.distance_from = chosen
+        self.last_point = point
+        self.box = (box[0] / w, box[1] / h, box[2] / w, box[3] / h)
+        self.head = (u / w, v / h)
+        return point
