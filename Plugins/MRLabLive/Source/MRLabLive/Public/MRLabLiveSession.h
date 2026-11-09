@@ -23,6 +23,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FMRLabLiveText, const FString&, Text
  * Lip sync: the voice runs through Epic's real-time speech-to-face solver; LipSyncCurves holds the
  * MetaHuman face controls (CTRL_expressions_*) for the sample being heard now. The voice is delayed
  * slightly so the solver's lookahead is available before each sample plays.
+ * Seeing: the camera service on the tracking PC sends a description of the people the camera sees as UDP packets to
+ * the port in Saved/VisionPort.txt (not in Git); new descriptions are added to the session as silent context while
+ * the visitor speaks, so the agent always knows its view.
  */
 UCLASS(ClassGroup = (MRLab), meta = (BlueprintSpawnableComponent))
 class MRLABLIVE_API UMRLabLiveSession : public UActorComponent
@@ -74,6 +77,11 @@ private:
 	void AddTranscript(bool bUser, const FString& Delta);
 	void QueueVoice(const int16* Samples, int32 NumSamples);
 	void UpdateLipSync();
+	void OpenViewSocket();
+	void CloseViewSocket();
+	void ReceiveViews();
+	void SetBlind(const FString& Reason);
+	void AppendView(const FString& Text);
 
 	// Runs on the audio capture thread.
 	void OnMicAudio(const float* Samples, int32 NumSamples);
@@ -114,4 +122,16 @@ private:
 	FString UserText;
 	FString AgentText;
 	bool bLastSpeakerUser = false;
+	double LastUserDelta = 0.0; // time of the latest user transcript fragment
+
+	// Frank's eyes: views from the camera service (UDP, port in Saved/VisionPort.txt) while the session runs, added to
+	// the session only while the visitor speaks.
+	class FSocket* ViewSocket = nullptr;
+	double LastViewPacket = 0.0;
+	bool bViewReceived = false;
+	FString NewestView;  // the newest description, or BlindView
+	double NewestViewTaken = 0.0; // when its picture was taken (FPlatformTime::Seconds)
+	FString LastView;    // the last view added to the session
+	int32 ViewCount = 0; // views added to this session, numbered in the context
+	bool bBlind = false; // the camera service is down or its camera stopped
 };

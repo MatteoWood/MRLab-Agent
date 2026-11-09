@@ -11,3 +11,5 @@ Plugins/*/Intermediate/
 *.VC.db
 __pycache__/
 CLAUDE.md
+TrackingPC/*.local.json
+TrackingPC/runtime/

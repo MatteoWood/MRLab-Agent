@@ -9,6 +9,9 @@
 #include "Components/AudioComponent.h"
 #include "Dom/JsonObject.h"
 #include "HAL/FileManager.h"
+#include "IPAddress.h"
+#include "Sockets.h"
+#include "SocketSubsystem.h"
 #include "Misc/Base64.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -53,6 +56,33 @@ namespace
 	const TCHAR* DelegationReply = TEXT(
 		"Nothing can be looked up here, there is no backend. Answer now from what you know: lab facts only from the lab "
 		"knowledge in your instructions; if a lab fact is not there, say that you do not know.");
+
+	// Frank's eyes (README 4.12): the camera service on the tracking PC keeps a short description of the people the
+	// frontal camera sees and sends it to this PC as UDP packets (port in Saved/VisionPort.txt). The plugin adds each new
+	// description to the session as silent context (session.thinking.append), so Frank answers questions about what he
+	// sees at once, without delegating.
+	// Views are added only while the visitor speaks: added at other times, they made the model speak on its own
+	// (laptop test, 2026-11-09), and every turn must start with the visitor. Only views of pictures taken before the
+	// visitor's latest words are added, so Frank sees what was there while the visitor spoke (fingers held up during
+	// the question and lowered at its end stay up).
+	const TCHAR* SeeingRule = TEXT(
+		"What you see: a camera on top of your wall is your eyes, so you can see the visitors in front of you. Your view "
+		"arrives silently, while the visitor speaks, as context that starts with \"View\" and a number. It describes each "
+		"person you see, from your left to your right: where they stand, their clothes, what they hold, their pose and "
+		"gesture now, and what they did in the last seconds. The newest view is what you see right now and replaces all "
+		"earlier ones. It is always there, so you never need to look: never generate <|SpawnThinking|> for anything you "
+		"see. A new view is never a reason to speak: you only ever reply to what the visitor says. When the visitor asks "
+		"about anything visible (how they look, their clothes, what they hold or do, their pose or gestures, how many "
+		"people are there, what you see), answer at once from the newest view, as if you saw it yourself. Never mention "
+		"views, descriptions or a camera feed unless the visitor asks how you can see. Now and then you may add a short "
+		"remark about something you see, such as something funny on their clothes, to your reply to what the visitor "
+		"said, in character; never bring it up on your own, and do not describe the whole view unprompted. If the newest "
+		"view says your eyes are not working, say that you cannot see right now.");
+	const TCHAR* BlindView = TEXT("Your eyes are not working right now: you cannot see anything until a new view arrives.");
+	constexpr double ViewSilenceSeconds = 3.0; // no packet for this long: the camera service is not running
+	constexpr int32 ViewMaxAgeMs = 5000;       // an older camera frame means the camera stopped
+	// The visitor counts as speaking until this long after the last word of their transcript.
+	constexpr double UserTurnSeconds = 1.0;
 
 	/** All .md files in Saved/Knowledge (written by the editor's Update Knowledge button), one section per file. */
 	FString LoadKnowledge()
@@ -463,9 +493,9 @@ void UMRLabLiveSession::StartSession()
 	}
 
 	const FString Knowledge = LoadKnowledge();
-	// The session runs without a delegation backend: everything comes from the instructions and the lab knowledge.
-	// Wording for gpt-live-1 from OpenAI's GPT-Live prompting guide.
-	const FString FullInstructions = Instructions + TEXT("\n\n") + NoDelegationRule
+	// The session runs without a delegation backend: facts come from the instructions and the lab knowledge, the view
+	// from the camera service (SeeingRule). Delegation wording for gpt-live-1 from OpenAI's GPT-Live prompting guide.
+	const FString FullInstructions = Instructions + TEXT("\n\n") + NoDelegationRule + TEXT("\n\n") + SeeingRule
 		+ (Knowledge.IsEmpty() ? FString() : TEXT("\n\nLab knowledge:") + Knowledge);
 
 	Socket = MakeShared<FLiveSocket>();
@@ -568,6 +598,7 @@ void UMRLabLiveSession::HandleMessage(const FString& Message)
 		UE_LOG(LogMRLabLive, Log, TEXT("Session started: %s"), *Message.Left(300));
 		bStarted = true;
 		StartAudio();
+		OpenViewSocket();
 	}
 	else if (Type == TEXT("session.closed"))
 	{
@@ -668,7 +699,118 @@ void UMRLabLiveSession::AddTranscript(bool bUser, const FString& Delta)
 		bLastSpeakerUser = bUser;
 	}
 	Text += Delta;
+	if (bUser)
+	{
+		LastUserDelta = FPlatformTime::Seconds();
+	}
 	(bUser ? OnUserTranscript : OnAgentTranscript).Broadcast(Text);
+}
+
+void UMRLabLiveSession::OpenViewSocket()
+{
+	LastViewPacket = FPlatformTime::Seconds();
+	const FString PortPath = FPaths::ProjectSavedDir() / TEXT("VisionPort.txt");
+	FString PortText;
+	FFileHelper::LoadFileToString(PortText, *PortPath);
+	const int32 Port = FCString::Atoi(*PortText.TrimStartAndEnd());
+	if (Port <= 0)
+	{
+		UE_LOG(LogMRLabLive, Warning, TEXT("No camera service port in %s; Frank cannot see"), *FPaths::ConvertRelativePathToFull(PortPath));
+		return;
+	}
+	ISocketSubsystem* Subsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+	ViewSocket = Subsystem->CreateSocket(NAME_DGram, TEXT("MRLabLive camera views"), FNetworkProtocolTypes::IPv4);
+	const TSharedRef<FInternetAddr> Address = Subsystem->CreateInternetAddr(FNetworkProtocolTypes::IPv4);
+	Address->SetAnyAddress();
+	Address->SetPort(Port);
+	if (!ViewSocket || !ViewSocket->SetNonBlocking(true) || !ViewSocket->Bind(*Address))
+	{
+		UE_LOG(LogMRLabLive, Error, TEXT("Could not listen for the camera service on UDP port %d; Frank cannot see"), Port);
+		CloseViewSocket();
+		return;
+	}
+	UE_LOG(LogMRLabLive, Log, TEXT("Listening for the camera service on UDP port %d"), Port);
+}
+
+void UMRLabLiveSession::CloseViewSocket()
+{
+	if (ViewSocket)
+	{
+		ViewSocket->Close();
+		ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(ViewSocket);
+		ViewSocket = nullptr;
+	}
+}
+
+void UMRLabLiveSession::ReceiveViews()
+{
+	const double Now = FPlatformTime::Seconds();
+	TSharedPtr<FJsonObject> Packet; // only the newest packet counts
+	if (ViewSocket)
+	{
+		static uint8 Buffer[65536];
+		const TSharedRef<FInternetAddr> From = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->CreateInternetAddr();
+		uint32 Pending = 0;
+		int32 Read = 0;
+		while (ViewSocket->HasPendingData(Pending) && ViewSocket->RecvFrom(Buffer, sizeof(Buffer), Read, *From))
+		{
+			const FUTF8ToTCHAR Text(reinterpret_cast<const ANSICHAR*>(Buffer), Read);
+			TSharedPtr<FJsonObject> Parsed;
+			if (FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(FString(Text.Length(), Text.Get())), Parsed) && Parsed.IsValid())
+			{
+				if (!bViewReceived)
+				{
+					UE_LOG(LogMRLabLive, Log, TEXT("Camera service: first view from %s"), *From->ToString(false));
+					bViewReceived = true;
+				}
+				Packet = Parsed;
+				LastViewPacket = Now;
+			}
+		}
+	}
+	if (!Packet.IsValid())
+	{
+		if (Now - LastViewPacket > ViewSilenceSeconds)
+		{
+			SetBlind(ViewSocket ? TEXT("no view from the camera service for 3 s") : TEXT("not listening for the camera service"));
+		}
+		return;
+	}
+	const int32 AgeMs = int32(Packet->GetNumberField(TEXT("age_ms")));
+	if (AgeMs > ViewMaxAgeMs)
+	{
+		SetBlind(FString::Printf(TEXT("the newest camera frame is %d ms old"), AgeMs));
+		return;
+	}
+	if (bBlind)
+	{
+		UE_LOG(LogMRLabLive, Log, TEXT("Camera service: views arriving"));
+	}
+	bBlind = false;
+	// Added to the session while the visitor speaks (TickComponent).
+	NewestView = Packet->GetStringField(TEXT("description"));
+	NewestViewTaken = Now - Packet->GetNumberField(TEXT("frame_age_ms")) / 1000.0;
+}
+
+void UMRLabLiveSession::SetBlind(const FString& Reason)
+{
+	if (!bBlind)
+	{
+		UE_LOG(LogMRLabLive, Warning, TEXT("Camera service: %s; Frank will be told that he cannot see"), *Reason);
+	}
+	bBlind = true;
+	NewestView = BlindView;
+	NewestViewTaken = 0.0; // always counts as before the visitor's words
+}
+
+void UMRLabLiveSession::AppendView(const FString& Text)
+{
+	++ViewCount;
+	TSharedRef<FJsonObject> Event = MakeShared<FJsonObject>();
+	Event->SetStringField(TEXT("type"), TEXT("session.thinking.append"));
+	Event->SetField(TEXT("delegation_id"), MakeShared<FJsonValueNull>()); // null: general session context
+	Event->SetStringField(TEXT("content"), FString::Printf(TEXT("View %d: %s"), ViewCount, *Text));
+	Send(Event);
 }
 
 void UMRLabLiveSession::StartAudio()
@@ -753,6 +895,16 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	}
 	UpdateLipSync();
 
+	ReceiveViews();
+	const double Now = FPlatformTime::Seconds();
+	if (bLastSpeakerUser && Now - LastUserDelta < UserTurnSeconds && NewestViewTaken <= LastUserDelta
+		&& !NewestView.IsEmpty() && NewestView != LastView)
+	{
+		LastView = NewestView;
+		AppendView(NewestView);
+		UE_LOG(LogMRLabLive, Log, TEXT("View %d: %s"), ViewCount, *NewestView);
+	}
+
 	TArray<int16> Pcm;
 	{
 		FScopeLock Lock(&MicLock);
@@ -777,6 +929,14 @@ void UMRLabLiveSession::Shutdown(const FString& Reason)
 	TSharedPtr<FLiveSocket> OldSocket = MoveTemp(Socket);
 	Socket.Reset();
 	bStarted = false;
+	// A new session starts without context: the next one gets the current view again.
+	CloseViewSocket();
+	bViewReceived = false;
+	NewestView.Reset();
+	NewestViewTaken = 0.0;
+	LastView.Reset();
+	ViewCount = 0;
+	bBlind = false;
 
 	if (Mic)
 	{
