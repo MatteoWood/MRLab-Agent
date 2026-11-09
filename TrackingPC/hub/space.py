@@ -28,25 +28,36 @@ DISTANCE = 950.0                          # cm from the camera to TARGET
 FOV = 50.0                                # degrees, vertically
 NEAR = 10.0
 TRAIL_SECONDS = 2.5
-BACKGROUND = QColor(4, 6, 10)
-WALL_COLOUR = QColor(60, 180, 255)
-GRID_COLOUR = QColor(30, 110, 200)
-BLOOM = 2.0  # strength of the glow added to the grid and the wall
-PEOPLE_COLOURS = [QColor(255, 80, 210), QColor(255, 160, 40), QColor(170, 255, 60), QColor(255, 225, 80),
-                  QColor(180, 140, 255), QColor(255, 90, 90), QColor(80, 255, 200)]
+# Minimal style: thin lines, muted colours, only a trace of glow.
+BACKGROUND = QColor(5, 7, 11)
+WALL_COLOUR = QColor(150, 200, 240)   # pale ice blue
+GRID_COLOUR = QColor(110, 140, 180)
+GRID_FADE = 420.0  # cm from the middle of the floor where the grid has faded out
+BLOOM = 0.45       # strength of the glow added to the grid and the wall
+PEOPLE_COLOURS = [QColor(240, 130, 170), QColor(240, 180, 110), QColor(150, 210, 150), QColor(230, 215, 130),
+                  QColor(170, 160, 240), QColor(235, 120, 120), QColor(120, 205, 210)]
 
 
 def floor_grid():
-    """Floor lines every 50 cm (every 100 cm brighter), from 3.5 m behind the visitors' area to the wall."""
-    minor, major = [], []
-    for x in range(-350, 301, 50):
-        (major if x % 100 == 0 else minor).append([x, -384, 0, x, 416, 0])
-    for y in range(-384, 417, 50):
-        (major if (y - 16) % 100 == 0 else minor).append([-350, y, 0, 300, y, 0])
-    return np.array(minor, float), np.array(major, float)
+    """Floor lines every 50 cm (every 100 cm a little brighter), cut into 25 cm pieces, each with a brightness
+    that fades with the distance from the middle of the floor: [(segments, alpha)], grouped by brightness."""
+    centre = np.array([0.0, 16.0])
+    groups = {}
+    lines = [((x, -384), (x, 416), x % 100 == 0) for x in range(-350, 301, 50)]
+    lines += [((-350, y), (300, y), (y - 16) % 100 == 0) for y in range(-384, 417, 50)]
+    for start, end, major in lines:
+        start, end = np.array(start, float), np.array(end, float)
+        pieces = max(1, int(np.linalg.norm(end - start) // 25))
+        for i in range(pieces):
+            a, b = start + (end - start) * i / pieces, start + (end - start) * (i + 1) / pieces
+            fade = max(0.0, 1.0 - (np.linalg.norm((a + b) / 2 - centre) / GRID_FADE) ** 2)
+            alpha = round((0.22 if major else 0.11) * fade, 3)
+            if alpha > 0.005:
+                groups.setdefault(alpha, []).append([a[0], a[1], 0, b[0], b[1], 0])
+    return [(np.array(segments), alpha) for alpha, segments in groups.items()]
 
 
-GRID_MINOR, GRID_MAJOR = floor_grid()
+GRID = floor_grid()
 WALL_PANELS = np.array(WALL["panels"], float)
 WALL_OUTLINE = np.array(WALL["outline"], float)
 
@@ -132,23 +143,22 @@ class Space(QWidget):
     # ---------- drawing ----------
 
     @staticmethod
-    def glow(painter, lines, colour, width, strength):
-        """Few lines (people's trails, rings) with a soft glow: one wide faint pass under a thin bright one."""
-        for w, a in ((width * 3, 0.18), (width, 0.9)):
-            painter.setPen(QPen(faded(colour, a * strength), w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            painter.drawLines(lines)
+    def line(painter, lines, colour, width, alpha):
+        # flat ends: round ends of neighbouring trail pieces overlap and add up to bright beads
+        painter.setPen(QPen(faded(colour, alpha), width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+        painter.drawLines(lines)
 
     @staticmethod
-    def light(painter, centre, radius, colour, strength=1.0):
-        """A glowing LED dot: white-hot core, coloured halo."""
-        gradient = QRadialGradient(centre, radius * 3)
-        gradient.setColorAt(0.0, faded(QColor(255, 255, 255), 0.95 * strength))
-        gradient.setColorAt(0.18, faded(colour, 0.9 * strength))
-        gradient.setColorAt(0.4, faded(colour, 0.25 * strength))
+    def light(painter, centre, radius, colour):
+        """An LED dot: small bright core, faint halo."""
+        gradient = QRadialGradient(centre, radius * 2.2)
+        gradient.setColorAt(0.0, faded(QColor(255, 255, 255), 0.9))
+        gradient.setColorAt(0.3, faded(colour, 0.85))
+        gradient.setColorAt(0.45, faded(colour, 0.12))
         gradient.setColorAt(1.0, faded(colour, 0.0))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(gradient)
-        painter.drawEllipse(centre, radius * 3, radius * 3)
+        painter.drawEllipse(centre, radius * 2.2, radius * 2.2)
 
     def scenery(self, view):
         """Grid and wall with their glow for the current view (made again only when the view changes)."""
@@ -160,15 +170,16 @@ class Space(QWidget):
         image.fill(BACKGROUND)
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for lines, colour, width in ((GRID_MINOR, faded(GRID_COLOUR, 0.35), 1.0), (GRID_MAJOR, faded(GRID_COLOUR, 0.6), 1.0),
-                                     (WALL_PANELS, faded(WALL_COLOUR, 0.75), 1.0), (WALL_OUTLINE, WALL_COLOUR, 2.0)):
+        layers = [(lines, faded(GRID_COLOUR, alpha), 0.8) for lines, alpha in GRID]
+        layers += [(WALL_PANELS, faded(WALL_COLOUR, 0.22), 0.6), (WALL_OUTLINE, faded(WALL_COLOUR, 0.9), 1.1)]
+        for lines, colour, width in layers:
             painter.setPen(QPen(colour, width))
             painter.drawLines(self.segments(lines, view))
         painter.end()
         pixels = np.frombuffer(image.constBits(), np.uint8).reshape(h, image.bytesPerLine() // 4, 4)[:, :w, :3]
         small = cv2.resize(pixels, (max(1, w // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA)
         small = cv2.subtract(small, np.full_like(small, (BACKGROUND.blue(), BACKGROUND.green(), BACKGROUND.red())))  # glow from the lines only
-        glow = cv2.resize(cv2.GaussianBlur(small, (0, 0), 2.5), (w, h), interpolation=cv2.INTER_LINEAR)
+        glow = cv2.resize(cv2.GaussianBlur(small, (0, 0), 1.5), (w, h), interpolation=cv2.INTER_LINEAR)
         lit = np.ascontiguousarray(cv2.addWeighted(pixels, 1.0, glow, BLOOM, 0))
         # in the screen's own format, so painting it each frame needs no conversion
         self.cache = QImage(lit.data, w, h, w * 3, QImage.Format.Format_BGR888).convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
@@ -197,9 +208,7 @@ class Space(QWidget):
             if not trail:
                 del self.trails[number]
 
-        font = QFont("Segoe UI", 9)
-        font.setBold(True)
-        painter.setFont(font)
+        painter.setFont(QFont("Segoe UI", 8))
         for number, main, position in people:
             colour = PEOPLE_COLOURS[(number - 1) % len(PEOPLE_COLOURS)]
             trail = self.trails[number]
@@ -210,25 +219,25 @@ class Space(QWidget):
                 for i in range(1, len(points)):
                     if depth[i] > NEAR and depth[i - 1] > NEAR:
                         line = [QLineF(*pixels[i - 1], *pixels[i])]
-                        self.glow(painter, line, colour, 3.0 if main else 2.0, 1.0 - ages[i] / TRAIL_SECONDS)
+                        self.line(painter, line, colour, 1.4 if main else 1.0, 0.8 * (1.0 - ages[i] / TRAIL_SECONDS))
             head = np.array(position, float)
             floor = head * np.array([1, 1, 0])
-            ring = np.array([floor + [30 * math.cos(a), 30 * math.sin(a), 0] for a in np.linspace(0, 2 * math.pi, 25)])
+            ring = np.array([floor + [22 * math.cos(a), 22 * math.sin(a), 0] for a in np.linspace(0, 2 * math.pi, 33)])
             ring_lines = np.column_stack([ring[:-1], ring[1:]])
-            self.glow(painter, self.segments(ring_lines, view), colour, 1.5, 0.6)
-            self.glow(painter, self.segments(np.array([[*head, *floor]]), view), colour, 1.0, 0.35)
+            self.line(painter, self.segments(ring_lines, view), colour, 0.8, 0.45)
+            self.line(painter, self.segments(np.array([[*head, *floor]]), view), colour, 0.6, 0.25)
             (pixel,), (depth,) = self.to_screen(head[None], view)
             if depth <= NEAR:
                 continue
             focal = view[4]
-            radius = max(4.0, focal * (9.0 if main else 5.0) / depth)  # cm to pixels at that distance
+            radius = max(2.5, focal * (5.5 if main else 3.5) / depth)  # cm to pixels at that distance
             self.light(painter, QPointF(*pixel), radius, colour)
-            painter.setPen(faded(colour, 0.95))
-            painter.drawText(QPointF(pixel[0] + radius * 1.6, pixel[1] - radius * 1.2), f"P{number}" + ("  MAIN" if main else ""))
+            painter.setPen(faded(colour, 0.75))
+            painter.drawText(QPointF(pixel[0] + radius * 1.8, pixel[1] - radius * 1.2), f"P{number}" + ("  main" if main else ""))
 
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-        painter.setPen(QColor(120, 130, 150))
-        painter.setFont(QFont("Segoe UI", 9))
+        painter.setPen(QColor(90, 100, 118))
+        painter.setFont(QFont("Segoe UI", 8))
         hint = "Drag to look around"
         if not people:
             hint += "  |  nobody tracked (start tracking on the Tracking page)"
