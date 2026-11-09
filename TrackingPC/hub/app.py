@@ -24,6 +24,9 @@ from hub.ollama import OllamaServer
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SETTINGS = ROOT / "hub.local.json"
+# Lab defaults (the Unreal PC address and the Moverse port, as Moverse uses them) live in the runtime folder,
+# which comes by USB stick and is not in Git: the repo is public, lab addresses stay out of it (README D13).
+LAB_DEFAULTS = ROOT / "runtime" / "defaults.json"
 DEFAULTS = {
     "unreal_address": "", "vision_port": 0, "moverse_port": 0, "frontal_id": "", "model": vision.DEFAULT_MODEL,
     # Frontal camera pose in tracking space (cm, degrees): a first guess (top middle of the wall, tilted
@@ -182,6 +185,8 @@ class Hub(QMainWindow):
         super().__init__()
         self.webcam = webcam
         self.settings = dict(DEFAULTS)
+        if LAB_DEFAULTS.exists():
+            self.settings.update(json.loads(LAB_DEFAULTS.read_text()))
         if SETTINGS.exists():
             self.settings.update(json.loads(SETTINGS.read_text()))
         self.log_lines = collections.deque(maxlen=300)
@@ -577,17 +582,18 @@ class Hub(QMainWindow):
         tracker = self.tracker
         if color is not None and self.frontal_streaming() and self.pages.currentIndex() == 1:
             image = cv2.resize(color[0], (640, 640 * color[0].shape[0] // color[0].shape[1]))
-            if tracker and tracker.face:
-                scale = 640 / color[0].shape[1]
-                x, y, w, h = (int(v * scale) for v in tracker.face)
-                cv2.rectangle(image, (x, y), (x + w, y + h), (246, 130, 59), 2)
+            box, head = (tracker.box, tracker.head) if tracker else (None, None)
+            if box and head:
+                w, h = image.shape[1], image.shape[0]
+                cv2.rectangle(image, (int(box[0] * w), int(box[1] * h)), (int(box[2] * w), int(box[3] * h)), (246, 130, 59), 2)
+                cv2.circle(image, (int(head[0] * w), int(head[1] * h)), 5, (80, 200, 120), -1)
             self.track_picture.setPixmap(to_pixmap(image, self.track_picture.width(), self.track_picture.height()))
         position = tracker.position if tracker else None
         for key, index in (("X", 0), ("Y", 1), ("Z", 2)):
             self.track_values[key].setText(f"{position[index]:.1f}" if position is not None else "-")
         self.track_values["Rate"].setText(f"{tracker.rate:.0f}" if tracker else "-")
         if tracker:
-            seen = f"face found, distance from {tracker.distance_from}" if tracker.face else "no face"
+            seen = f"head found, distance from {tracker.distance_from}" if tracker.head else "nobody found"
             self.track_info.setText(f"{seen}  |  {tracker.sent} packets sent to {self.settings['unreal_address']}:{self.settings['moverse_port']}")
         else:
             self.track_info.setText("Stopped. Moverse must not run at the same time (both would send to the same port).")

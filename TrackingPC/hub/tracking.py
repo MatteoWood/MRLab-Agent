@@ -1,9 +1,10 @@
 """Fast head tracker (Step 8B, first version, not tested with an OAK camera yet).
 
-The frontal camera's colour frames go through a face detector (OpenCV's built-in Haar cascade; no model
-download needed). The distance to the face comes from the camera's stereo depth at the face, or, where
-depth has no value, from the face width (a face is about FACE_WIDTH_MM wide). The point between the eyes
-in camera space is moved into the tracking space NDC_Basic uses (cm; X towards the wall, Y to the right
+With an OAK as frontal camera, the head points come from the pose model running on the camera's own chip
+(YOLOv8 nano pose with stereo depth, see cameras.py): the middle of the eyes in camera space, at up to
+30 per second. Without it (webcam test, or the model file missing) the PC finds the face in the colour
+frames with OpenCV's built-in Haar cascade and estimates the distance from the face width (a face is
+about FACE_WIDTH_MM wide). The point in camera space is moved into the tracking space NDC_Basic uses (cm; X towards the wall, Y to the right
 seen facing the wall, Z height above the floor) with the camera pose from the settings, smoothed with a
 One Euro filter, and sent to the Unreal PC in Moverse's packet format (subject Actor0, 25 moverserig
 bones, head at the point), so the Moverse Live Link plugin, NDC_Basic and the gaze work unchanged.
@@ -124,18 +125,25 @@ class OneEuro:
 
 
 class FrontalFrames:
-    """Newest colour frame and depth frame of the frontal camera, with the colour camera's intrinsics."""
+    """Newest colour frame of the frontal camera with its intrinsics, and the head points of its pose model."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.color = None  # (BGR image, capture time)
-        self.depth = None  # (uint16 depth in mm aligned to the colour image, any size with the same aspect)
+        self.depth = None  # uint16 depth in mm aligned to the colour image, or None
         self.intrinsics = None  # (fx, fy, cx, cy) at the colour image size
         self.seq = 0
+        self.people = None  # head points from the camera's pose model (cameras.heads), None without it
+        self.people_time = 0.0
+        self.people_seq = 0
 
     def publish(self, color, captured, depth=None):
         with self.lock:
             self.color, self.depth, self.seq = (color, captured), depth, self.seq + 1
+
+    def publish_people(self, people, captured):
+        with self.lock:
+            self.people, self.people_time, self.people_seq = people, captured, self.people_seq + 1
 
 
 class Tracker(threading.Thread):
@@ -145,9 +153,11 @@ class Tracker(threading.Thread):
         self.running = True
         self.detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
         # Shown in the window:
-        self.face = None       # (x, y, w, h) in the colour image, or None
+        self.box = None        # tracked person or face, (x0, y0, x1, y1) as fractions of the colour image
+        self.head = None       # head point, (u, v) as fractions of the colour image
         self.position = None   # filtered head position in tracking space (cm)
-        self.distance_from = ""  # "depth" or "face size"
+        self.distance_from = ""  # how the distance was found
+        self.last_point = None  # last head point in camera space (mm), to keep following the same person
         self.rate = 0.0        # tracked frames per second
         self.sent = 0
 
@@ -162,18 +172,26 @@ class Tracker(threading.Thread):
         last_seq, last_seen, last_subject, times = 0, 0.0, 0.0, []
         while self.running:
             with self.frames.lock:
-                seq, color, depth, intrinsics = self.frames.seq, self.frames.color, self.frames.depth, self.frames.intrinsics
-            if seq == last_seq or color is None or intrinsics is None:
-                time.sleep(0.005)
+                f = self.frames
+                if f.people is not None:  # pose model on the camera
+                    seq, people, captured = f.people_seq, f.people, f.people_time
+                else:  # face detector on this PC
+                    seq, color, depth, intrinsics = f.seq, f.color, f.depth, f.intrinsics
+                    people = None
+            if seq == last_seq or (people is None and (color is None or intrinsics is None)):
+                time.sleep(0.003)
                 continue
             last_seq = seq
-            image, captured = color
-            point = self.locate(image, depth, intrinsics)
+            if people is not None:
+                point = self.choose(people)
+            else:
+                image, captured = color
+                point = self.locate(image, depth, intrinsics)
             now = time.monotonic()
             if point is None:
                 if now - last_seen > LOST_AFTER:
-                    self.position, self.face = None, None
-                    smooth.t = None  # start fresh when the face comes back
+                    self.position = self.box = self.head = self.last_point = None
+                    smooth.t = None  # start fresh when the person comes back
                 continue
             last_seen = now
             head = smooth(translation + rotation @ (point / 10.0), captured)  # mm to cm
@@ -190,6 +208,23 @@ class Tracker(threading.Thread):
                 self.log(f"tracking: send failed: {error}")
                 time.sleep(0.5)
 
+    def choose(self, people):
+        """Head point (camera space, mm) of the person followed: the one closest to the last head point
+        (within 50 cm), else the one nearest to the camera."""
+        if not people:
+            return None
+        person = None
+        if self.last_point is not None:
+            near = min(people, key=lambda p: np.linalg.norm(p["point"] - self.last_point))
+            if np.linalg.norm(near["point"] - self.last_point) < 500:
+                person = near
+        if person is None:
+            person = min(people, key=lambda p: p["point"][2])
+        self.last_point = person["point"]
+        self.box, self.head = person["box"], person["head"]
+        self.distance_from = "pose model and depth on the camera"
+        return person["point"]
+
     def locate(self, image, depth, intrinsics):
         """Point between the eyes of the largest face, in camera space (mm), or None."""
         grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -197,9 +232,11 @@ class Tracker(threading.Thread):
         if len(faces) == 0:
             return None
         x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-        self.face = (int(x), int(y), int(w), int(h))
+        width, height = image.shape[1], image.shape[0]
         fx, fy, cx, cy = intrinsics
         u, v = x + w / 2.0, y + 0.4 * h  # the eyes sit a bit above the middle of the face box
+        self.box = (x / width, y / height, (x + w) / width, (y + h) / height)
+        self.head = (u / width, v / height)
         z = None
         if depth is not None:
             sx, sy = depth.shape[1] / image.shape[1], depth.shape[0] / image.shape[0]
