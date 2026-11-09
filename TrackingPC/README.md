@@ -42,6 +42,11 @@ To build `runtime\` again (on a PC with internet): `2_setup.bat` downloads every
      only sends colour and depth. The followed person gets a box and a green dot between the eyes, X/Y/Z
      show the head position ("distance from camera depth"), and `NDC_Basic` on the Unreal PC moves the
      view as with Moverse. Moverse must not run at the same time.
+     Several people: each gets a number (P1, P2, ...). Only the main person (blue box, "MAIN") is sent.
+     **Click a person** in the picture to make them the main person. Without a click it is the nearest;
+     if the clicked person is gone for 2 s, the nearest again. **Automatic (nearest)** undoes the click.
+     With tracking on, "What Frank sees" (Vision page) starts with "Main visitor": that person first,
+     then the others as Person 2, 3, ...
 5. Copy the **Log** (Vision page) to Claude when something does not work.
 6. Close the hub window (it also stops its Ollama). Start Moverse again if needed.
 

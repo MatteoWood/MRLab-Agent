@@ -119,6 +119,24 @@ def to_pixmap(image, width, height):
     return QPixmap.fromImage(qimage).scaled(width, height, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
 
+class ClickablePicture(QLabel):
+    """Picture that reports clicks as fractions of the shown image (the image is centred and scaled to fit)."""
+
+    def __init__(self, on_click):
+        super().__init__()
+        self.on_click = on_click
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        pixmap = self.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+        x0, y0 = (self.width() - pixmap.width()) / 2, (self.height() - pixmap.height()) / 2
+        x, y = (event.position().x() - x0) / pixmap.width(), (event.position().y() - y0) / pixmap.height()
+        if 0 <= x <= 1 and 0 <= y <= 1:
+            self.on_click(x, y)
+
+
 class Tile(QFrame):
     """One camera: picture, name, address, status, frontal choice."""
 
@@ -348,8 +366,21 @@ class Hub(QMainWindow):
         settings.setFixedWidth(360)
         body.addWidget(settings)
 
-        live, live_box = card("Frontal camera")
-        self.track_picture = label("no frontal camera streaming", "picture")
+        live, live_box = card()
+        top = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        titles.addWidget(label("Frontal camera", "cardTitle"))
+        titles.addWidget(label("Click a person to make them the main person: only their head drives the 3D view "
+                               "and Frank's gaze.", "small", wrap=True))
+        top.addLayout(titles, 1)
+        self.auto_button = QPushButton("Automatic (nearest)")
+        self.auto_button.clicked.connect(self.follow_nearest)
+        top.addWidget(self.auto_button)
+        live_box.addLayout(top)
+        self.track_picture = ClickablePicture(self.pick_person)
+        self.track_picture.setObjectName("picture")
+        self.track_picture.setText("no frontal camera streaming")
         self.track_picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.track_picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         live_box.addWidget(self.track_picture, 1)
@@ -490,6 +521,31 @@ class Hub(QMainWindow):
     def frontal_streaming(self):
         return any(c.device_id == self.settings["frontal_id"] and c.status == "streaming" for c in self.cameras)
 
+    def main_person(self):
+        """(number, box, others seen, position text) of the tracker's main person for the vision model, or None
+        (no tracking or nobody). The position comes from the tracker: distance from the wall (the frontal camera
+        is on the wall) and side as Frank sees it (+Y, the visitor's right, is Frank's left)."""
+        tracker = self.tracker
+        main = tracker.main_box() if tracker else None
+        position = tracker.position if tracker else None
+        if main is None or position is None:
+            return None
+        distance = (self.settings["camera_x"] - position[0]) / 100
+        side = (position[1] - self.settings["camera_y"]) / 100
+        where = "in the middle" if abs(side) < 0.3 else f"{abs(side):.1f} m to Frank's {'left' if side > 0 else 'right'}"
+        return main[0], main[1], len(tracker.people) > 1, f"about {distance:.1f} m from the wall, {where}"
+
+    def pick_person(self, x, y):
+        if self.tracker:
+            number = self.tracker.select(x, y)
+            if number is not None:
+                self.log(f"tracking: main person P{number} (clicked)")
+
+    def follow_nearest(self):
+        if self.tracker:
+            self.tracker.automatic()
+            self.log("tracking: main person chosen automatically (nearest)")
+
     def toggle_tracking(self):
         if self.tracker:
             self.stop_tracking()
@@ -534,7 +590,7 @@ class Hub(QMainWindow):
                 return
             if self.vision_state != "loading":
                 return  # stopped meanwhile
-            self.describer = vision.Describer(self.vision_store, s["model"], self.log)
+            self.describer = vision.Describer(self.vision_store, s["model"], self.log, self.main_person)
             self.sender = vision.Sender(self.vision_store, self.describer, (s["unreal_address"], int(s["vision_port"])), self.log)
             self.describer.start()
             self.sender.start()
@@ -581,19 +637,33 @@ class Hub(QMainWindow):
             color = self.frontal.color
         tracker = self.tracker
         if color is not None and self.frontal_streaming() and self.pages.currentIndex() == 1:
-            image = cv2.resize(color[0], (640, 640 * color[0].shape[0] // color[0].shape[1]))
-            box, head = (tracker.box, tracker.head) if tracker else (None, None)
-            if box and head:
-                w, h = image.shape[1], image.shape[0]
-                cv2.rectangle(image, (int(box[0] * w), int(box[1] * h)), (int(box[2] * w), int(box[3] * h)), (246, 130, 59), 2)
-                cv2.circle(image, (int(head[0] * w), int(head[1] * h)), 5, (80, 200, 120), -1)
+            image = cv2.resize(color[0], (960, 960 * color[0].shape[0] // color[0].shape[1]))
+            w, h = image.shape[1], image.shape[0]
+            for person in (tracker.people if tracker else []):
+                main = person["number"] == tracker.main
+                box, head = person["box"], person["head"]
+                colour = (246, 130, 59) if main else (150, 150, 150)  # blue accent for the main person, else grey
+                x0, y0 = int(box[0] * w), int(box[1] * h)
+                cv2.rectangle(image, (x0, y0), (int(box[2] * w), int(box[3] * h)), colour, 3 if main else 1)
+                cv2.circle(image, (int(head[0] * w), int(head[1] * h)), 6, (80, 200, 120) if main else colour, -1)
+                name = f"P{person['number']}" + ("  MAIN" if main else "")
+                cv2.rectangle(image, (x0, max(0, y0 - 24)), (x0 + 13 * len(name) + 10, max(24, y0)), colour, -1)
+                cv2.putText(image, name, (x0 + 5, max(18, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             self.track_picture.setPixmap(to_pixmap(image, self.track_picture.width(), self.track_picture.height()))
         position = tracker.position if tracker else None
         for key, index in (("X", 0), ("Y", 1), ("Z", 2)):
             self.track_values[key].setText(f"{position[index]:.1f}" if position is not None else "-")
         self.track_values["Rate"].setText(f"{tracker.rate:.0f}" if tracker else "-")
+        self.auto_button.setEnabled(bool(tracker and tracker.chosen))
         if tracker:
-            seen = f"head found, distance from {tracker.distance_from}" if tracker.head else "nobody found"
+            count = len(tracker.people)
+            if tracker.main is not None and position is not None:
+                how = "clicked" if tracker.chosen else "automatic: nearest"
+                seen = f"{count} seen, main person P{tracker.main} ({how}), distance from {tracker.distance_from}"
+            elif tracker.chosen:
+                seen = f"{count} seen, waiting for P{tracker.main} (clicked) to be visible again"
+            else:
+                seen = f"{count} seen" if count else "nobody found"
             self.track_info.setText(f"{seen}  |  {tracker.status}  |  {tracker.sent} packets sent to "
                                     f"{self.settings['unreal_address']}:{self.settings['moverse_port']}")
         else:

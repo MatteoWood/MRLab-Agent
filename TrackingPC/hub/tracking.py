@@ -11,6 +11,11 @@ smoothed with a One Euro filter, and sent to the Unreal PC in Moverse's packet f
 25 moverserig bones, head at the point), so the Moverse Live Link plugin, NDC_Basic and the gaze work
 unchanged. When nobody is seen for LOST_AFTER seconds nothing is sent, so the subject turns Unresponsive.
 Moverse must not run at the same time (two senders on one port).
+
+Several people: every visible person gets a number that follows them from frame to frame (nearest head
+point). Only the main person's head is sent. The main person is the one clicked in the hub's window;
+without a click (or when the clicked person has been gone for KEEP_CHOSEN seconds) it is the person
+nearest to the camera, kept while visible.
 """
 import json
 import math
@@ -25,6 +30,9 @@ from hub import pose
 EYE_DISTANCE_MM = 63.0
 MIN_POINT_CONFIDENCE = 0.5
 LOST_AFTER = 0.5
+MATCH_DISTANCE = 0.1  # a head moves less than this (fraction of the image) between two frames
+FORGET_AFTER = 2.0    # seconds a person may be unseen and keep their number
+KEEP_CHOSEN = 2.0     # seconds the clicked main person may be unseen before the nearest is followed again
 SUBJECT = "Actor0"
 
 # Moverse rig (from /Game/Actor0/asset): name, parent index, location relative to the parent.
@@ -148,15 +156,39 @@ class Tracker(threading.Thread):
         self.frames, self.settings, self.log = frames, settings, log
         self.running = True
         self.model = None
-        # Shown in the window:
+        self.tracks = {}       # number -> person (also people unseen for up to FORGET_AFTER seconds)
+        self.next_number = 1
+        self.main_seen = 0.0   # when the main person was last seen
+        # Shown in the window (read by the window's thread):
         self.status = "loading the pose model"
-        self.box = None        # followed person, (x0, y0, x1, y1) as fractions of the colour image
-        self.head = None       # head point, (u, v) as fractions of the colour image
-        self.position = None   # filtered head position in tracking space (cm)
-        self.distance_from = ""  # how the distance was found
-        self.last_point = None  # last head point in camera space (mm), to keep following the same person
+        self.people = []       # people seen in the newest frame: number, point (camera mm), box and head
+                               # (fractions of the colour image), source of the distance
+        self.main = None       # number of the main person, whose head is sent
+        self.chosen = False    # main person chosen by a click (else: automatic, the nearest)
+        self.position = None   # filtered head position of the main person in tracking space (cm)
+        self.distance_from = ""  # how the main person's distance was found
         self.rate = 0.0        # tracked frames per second
         self.sent = 0
+
+    def select(self, x, y):
+        """Make the person under (x, y) (fractions of the colour image) the main person; their number or None."""
+        hits = [p for p in self.people if p["box"][0] <= x <= p["box"][2] and p["box"][1] <= y <= p["box"][3]]
+        if not hits:
+            return None
+        person = min(hits, key=lambda p: (p["box"][2] - p["box"][0]) * (p["box"][3] - p["box"][1]))
+        self.main, self.chosen, self.main_seen = person["number"], True, time.monotonic()
+        return person["number"]
+
+    def automatic(self):
+        """Follow the nearest person again (keeps the current main person while visible)."""
+        self.chosen = False
+
+    def main_box(self):
+        """(number, box as fractions) of the main person while visible, else None (for the vision model)."""
+        for person in self.people:
+            if person["number"] == self.main:
+                return person["number"], person["box"]
+        return None
 
     def run(self):
         try:
@@ -173,7 +205,7 @@ class Tracker(threading.Thread):
         translation = np.array([s["camera_x"], s["camera_y"], s["camera_z"]], float)
         smooth = OneEuro(s["filter_min_cutoff"], s["filter_beta"])
         offset, subject = head_offset(), subject_packet()
-        last_seq, last_seen, last_subject, times = 0, 0.0, 0.0, []
+        last_seq, last_seen, last_subject, last_main, times = 0, 0.0, 0.0, None, []
         while self.running:
             with self.frames.lock:
                 seq, color, depth, intrinsics = self.frames.seq, self.frames.color, self.frames.depth, self.frames.intrinsics
@@ -182,15 +214,20 @@ class Tracker(threading.Thread):
                 continue
             last_seq = seq  # the newest frame only: frames that came while the model ran are skipped
             image, captured = color
-            point = self.locate(image, depth, intrinsics)
             now = time.monotonic()
-            if point is None:
+            self.number_people(self.detect(image, depth, intrinsics), now)
+            main = self.choose_main(now)
+            if main is None:
                 if now - last_seen > LOST_AFTER:
-                    self.position = self.box = self.head = self.last_point = None
-                    smooth.t = None  # start fresh when the person comes back
+                    self.position = None
+                    smooth.t = None  # start fresh when someone comes back
                 continue
+            if main["number"] != last_main:
+                smooth.t = None  # another person: no gliding from the old one's position
+                last_main = main["number"]
             last_seen = now
-            head = smooth(translation + rotation @ (point / 10.0), captured)  # mm to cm
+            self.distance_from = main["source"]
+            head = smooth(translation + rotation @ (main["point"] / 10.0), captured)  # mm to cm
             self.position = head
             times = [t for t in times if now - t < 1.0] + [now]
             self.rate = len(times)
@@ -204,11 +241,9 @@ class Tracker(threading.Thread):
                 self.log(f"tracking: send failed: {error}")
                 time.sleep(0.5)
 
-    def locate(self, image, depth, intrinsics):
-        """Head point (camera space, mm; x right, y down, z forward) of the person followed, or None.
-
-        Followed: the person whose head is closest to the last head point (within 50 cm), else the
-        person nearest to the camera."""
+    def detect(self, image, depth, intrinsics):
+        """Head point of every person in the image: camera space in mm (x right, y down, z forward), with
+        the person box and the head point as fractions of the image and where the distance came from."""
         h, w = image.shape[:2]
         fx, fy, cx, cy = intrinsics
         heads = []
@@ -238,18 +273,51 @@ class Tracker(threading.Thread):
                     z, source = fx * EYE_DISTANCE_MM / eyes, "eye distance"
             if z is None:
                 continue
-            heads.append((np.array([(u - cx) * z / fx, (v - cy) * z / fy, z]), person["box"], (u, v), source))
-        if not heads:
+            box = person["box"]
+            heads.append({
+                "point": np.array([(u - cx) * z / fx, (v - cy) * z / fy, z]),
+                "box": (box[0] / w, box[1] / h, box[2] / w, box[3] / h),
+                "head": (u / w, v / h),
+                "source": source,
+            })
+        return heads
+
+    def number_people(self, heads, now):
+        """Give each head the number of the nearest person seen before (within MATCH_DISTANCE), else a new one."""
+        pairs = sorted(
+            (math.dist(head["head"], track["head"]), i, number)
+            for i, head in enumerate(heads) for number, track in self.tracks.items())
+        used_heads, used_numbers = set(), set()
+        for distance, i, number in pairs:
+            if distance > MATCH_DISTANCE:
+                break
+            if i in used_heads or number in used_numbers:
+                continue
+            heads[i]["number"] = number
+            used_heads.add(i)
+            used_numbers.add(number)
+        for head in heads:
+            if "number" not in head:
+                head["number"] = self.next_number
+                self.next_number += 1
+            head["seen"] = now
+            self.tracks[head["number"]] = head
+        self.tracks = {n: t for n, t in self.tracks.items() if now - t["seen"] <= FORGET_AFTER}
+        self.people = heads
+
+    def choose_main(self, now):
+        """The main person if visible; else wait for the clicked one (up to KEEP_CHOSEN), else the nearest."""
+        visible = {person["number"]: person for person in self.people}
+        if self.main in visible:
+            self.main_seen = now
+            return visible[self.main]
+        if self.chosen:
+            if now - self.main_seen <= KEEP_CHOSEN:
+                return None  # the clicked person is hidden for a moment: send nothing rather than someone else
+            self.log(f"tracking: P{self.main} gone for {KEEP_CHOSEN:.0f} s, following the nearest person")
+            self.chosen = False
+        if not visible:
             return None
-        chosen = None
-        if self.last_point is not None:
-            near = min(heads, key=lambda c: np.linalg.norm(c[0] - self.last_point))
-            if np.linalg.norm(near[0] - self.last_point) < 500:
-                chosen = near
-        if chosen is None:
-            chosen = min(heads, key=lambda c: c[0][2])
-        point, box, (u, v), self.distance_from = chosen
-        self.last_point = point
-        self.box = (box[0] / w, box[1] / h, box[2] / w, box[3] / h)
-        self.head = (u / w, v / h)
-        return point
+        nearest = min(visible.values(), key=lambda person: person["point"][2])
+        self.main, self.main_seen = nearest["number"], now
+        return nearest
