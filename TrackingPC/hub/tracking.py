@@ -161,8 +161,9 @@ class Tracker(threading.Thread):
         self.main_seen = 0.0   # when the main person was last seen
         # Shown in the window (read by the window's thread):
         self.status = "loading the pose model"
-        self.people = []       # people seen in the newest frame: number, point (camera mm), box and head
-                               # (fractions of the colour image), source of the distance
+        self.people = []       # people seen in the newest frame: number, point (camera mm), world (tracking
+                               # space cm, lightly smoothed, for the 3D view), box and head (fractions of
+                               # the colour image), source of the distance
         self.main = None       # number of the main person, whose head is sent
         self.chosen = False    # main person chosen by a click (else: automatic, the nearest)
         self.position = None   # filtered head position of the main person in tracking space (cm)
@@ -203,6 +204,7 @@ class Tracker(threading.Thread):
         address = (s["unreal_address"], int(s["moverse_port"]))
         rotation = camera_rotation(s["camera_yaw"], s["camera_pitch"], s["camera_roll"])
         translation = np.array([s["camera_x"], s["camera_y"], s["camera_z"]], float)
+        self.to_world = lambda point: translation + rotation @ (point / 10.0)  # camera mm to tracking cm
         smooth = OneEuro(s["filter_min_cutoff"], s["filter_beta"])
         offset, subject = head_offset(), subject_packet()
         last_seq, last_seen, last_subject, last_main, times = 0, 0.0, 0.0, None, []
@@ -227,7 +229,7 @@ class Tracker(threading.Thread):
                 last_main = main["number"]
             last_seen = now
             self.distance_from = main["source"]
-            head = smooth(translation + rotation @ (main["point"] / 10.0), captured)  # mm to cm
+            head = smooth(self.to_world(main["point"]), captured)
             self.position = head
             times = [t for t in times if now - t < 1.0] + [now]
             self.rate = len(times)
@@ -274,8 +276,10 @@ class Tracker(threading.Thread):
             if z is None:
                 continue
             box = person["box"]
+            point = np.array([(u - cx) * z / fx, (v - cy) * z / fy, z])
             heads.append({
-                "point": np.array([(u - cx) * z / fx, (v - cy) * z / fy, z]),
+                "point": point,
+                "world": self.to_world(point),
                 "box": (box[0] / w, box[1] / h, box[2] / w, box[3] / h),
                 "head": (u / w, v / h),
                 "source": source,
@@ -294,6 +298,7 @@ class Tracker(threading.Thread):
             if i in used_heads or number in used_numbers:
                 continue
             heads[i]["number"] = number
+            heads[i]["world"] = 0.5 * heads[i]["world"] + 0.5 * self.tracks[number]["world"]  # calmer in the 3D view
             used_heads.add(i)
             used_numbers.add(number)
         for head in heads:

@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QDoubl
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton,
                                QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
-from hub import cameras, tracking, vision
+from hub import cameras, space, tracking, vision
 from hub.ollama import OllamaServer
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -228,6 +228,7 @@ class Hub(QMainWindow):
         self.pages = QStackedWidget()
         self.pages.addWidget(self.build_cameras())
         self.pages.addWidget(self.build_tracking())
+        self.pages.addWidget(self.build_space())
         self.pages.addWidget(self.build_vision())
         row.addWidget(self.pages, 1)
         self.select_page(0)
@@ -252,7 +253,7 @@ class Hub(QMainWindow):
         layout.addWidget(label("Tracking PC", "muted"))
         layout.addSpacing(22)
         self.nav = []
-        for index, name in enumerate(["Cameras", "Tracking", "Vision"]):
+        for index, name in enumerate(["Cameras", "Tracking", "3D view", "Vision"]):
             button = QPushButton(name)
             button.setObjectName("nav")
             button.setCheckable(True)
@@ -397,6 +398,28 @@ class Hub(QMainWindow):
         body.addWidget(live, 1)
         layout.addLayout(body, 1)
         return widget
+
+    def build_space(self):
+        widget, layout, _, _ = self.page("3D view", "The lab in tracking space: the LED wall, the floor and every tracked person, live")
+        self.space = space.Space(self.tracked_people)
+        frame, box = card()
+        box.setContentsMargins(2, 2, 2, 2)
+        box.addWidget(self.space)
+        layout.addWidget(frame, 1)
+        return widget
+
+    def tracked_people(self):
+        """[(number, is main, position in tracking space cm)] for the 3D view; the main person at the
+        smoothed position that is sent to Unreal."""
+        tracker = self.tracker
+        if not tracker:
+            return []
+        found = []
+        for person in tracker.people:
+            main = person["number"] == tracker.main
+            position = tracker.position if main and tracker.position is not None else person["world"]
+            found.append((person["number"], main, position))
+        return found
 
     def build_vision(self):
         widget, layout, head, _ = self.page("Vision", "Local vision model; Frank gets a description of the people in front of the wall")

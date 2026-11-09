@@ -47,6 +47,10 @@ To build `runtime\` again (on a PC with internet): `2_setup.bat` downloads every
      if the clicked person is gone for 2 s, the nearest again. **Automatic (nearest)** undoes the click.
      With tracking on, "What Frank sees" (Vision page) starts with "Main visitor": that person first,
      then the others as Person 2, 3, ...
+   - **3D view**: the lab with the LED wall and the floor, every tracked person live (own colour, the
+     main person bigger, a fading trail, a line down to a ring on the floor for the height). Drag with
+     the mouse to turn and tilt the view. Use it to check the camera position and tilt settings: a
+     person standing 2 m in front of the middle of the wall should appear there.
 5. Copy the **Log** (Vision page) to Claude when something does not work.
 6. Close the hub window (it also stops its Ollama). Start Moverse again if needed.
 
@@ -65,6 +69,8 @@ To build `runtime\` again (on a PC with internet): `2_setup.bat` downloads every
 | `hub\cameras.py` | Search, connect, stream (frontal camera: colour 960x540 at 30 fps and depth aligned to it; others: small preview); no model runs on the cameras |
 | `hub\pose.py` | YOLO11 nano pose on this PC (ONNX Runtime; graphics card or processor, whichever is faster) |
 | `hub\tracking.py` | Head tracker: head point and its distance, tracking space, smoothing, Moverse packets |
+| `hub\space.py`, `hub\led_wall.json` | The 3D view; the wall's panel edges in tracking space |
+| `tools\led_wall_from_fbx.py` | Makes `led_wall.json` from the lab's `LEDWall.fbx` (run again if the wall model changes) |
 | `hub\vision.py` | Description of the people with the local model, sent to Unreal |
 | `hub\ollama.py` | Starts and stops the hub's own Ollama |
 | `mrlab_camera_service.py` | Vision without a window (also for the laptop: `--source webcam`) |
