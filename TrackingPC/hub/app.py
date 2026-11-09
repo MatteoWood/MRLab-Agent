@@ -1,0 +1,660 @@
+"""MRLab Hub: the tracking PC program with a window (started by MRLabHub.exe).
+
+Pages: Cameras (search, connect, the 8 camera pictures, choose the frontal camera), Tracking (fast head
+tracker sending Moverse packets to Unreal, with its settings), Vision (the local vision model and Frank's
+view sent to Unreal). Settings are saved in hub.local.json next to MRLabHub.exe (not in Git).
+Run from the folder: runtime\\python\\pythonw.exe -m hub [--webcam]   (--webcam: laptop testing)
+"""
+import collections
+import json
+import pathlib
+import sys
+import threading
+import time
+
+import cv2
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton,
+                               QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
+
+from hub import cameras, tracking, vision
+from hub.ollama import OllamaServer
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+SETTINGS = ROOT / "hub.local.json"
+DEFAULTS = {
+    "unreal_address": "", "vision_port": 0, "moverse_port": 0, "frontal_id": "", "model": vision.DEFAULT_MODEL,
+    # Frontal camera pose in tracking space (cm, degrees): a first guess (top middle of the wall, tilted
+    # down); measure it in the lab.
+    "camera_x": 309.0, "camera_y": 16.0, "camera_z": 310.0, "camera_yaw": 0.0, "camera_pitch": 25.0, "camera_roll": 0.0,
+    "filter_min_cutoff": 1.0, "filter_beta": 0.05,
+}
+
+ACCENT, OK, WARN, BAD, MUTED = "#3B82F6", "#3FB950", "#D29922", "#F85149", "#5A6070"
+STYLE = """
+* { font-family: "Segoe UI"; font-size: 10pt; color: #E6E8EC; }
+QMainWindow, #page { background: #0F1115; }
+#sidebar { background: #14171D; border-right: 1px solid #22262E; }
+#brand { font-size: 15pt; font-weight: 600; }
+#muted { color: #8A90A0; }
+#small { color: #8A90A0; font-size: 9pt; }
+#title { font-size: 18pt; font-weight: 600; }
+#cardTitle { font-size: 11pt; font-weight: 600; }
+#value { font-size: 15pt; font-weight: 600; font-family: "Consolas"; }
+#nav { text-align: left; padding: 9px 14px; border: none; border-radius: 8px; color: #9AA1AE; background: transparent; }
+#nav:checked { background: #1F2430; color: #FFFFFF; }
+#nav:hover:!checked { background: #191D25; }
+#card { background: #14171D; border: 1px solid #22262E; border-radius: 12px; }
+#tile { background: #14171D; border: 1px solid #22262E; border-radius: 12px; }
+#tileFrontal { background: #14171D; border: 1px solid #3B82F6; border-radius: 12px; }
+#picture { background: #0A0C0F; border-radius: 8px; color: #5A6070; }
+#badge { background: #1E3A6E; color: #BFD5FF; border-radius: 6px; padding: 1px 7px; font-size: 8pt; font-weight: 600; }
+QPushButton { background: #222733; border: 1px solid #2C3240; border-radius: 8px; padding: 7px 14px; }
+QPushButton:hover { background: #2A3040; }
+QPushButton:disabled { color: #5A6070; background: #181B22; }
+QPushButton#primary { background: #3B82F6; border: none; color: white; font-weight: 600; }
+QPushButton#primary:hover { background: #4C8DF7; }
+QPushButton#primary:disabled { background: #22304A; color: #7A8AA8; }
+QPushButton#stop { background: #3A1F24; border: 1px solid #5A2A30; color: #FF9A9A; font-weight: 600; }
+QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox, QPlainTextEdit {
+    background: #0F1115; border: 1px solid #2C3240; border-radius: 6px; padding: 5px 8px; selection-background-color: #3B82F6; }
+QDoubleSpinBox, QSpinBox { padding: 0px 8px; min-height: 30px; }
+QAbstractSpinBox QLineEdit { padding: 0px; border: none; background: transparent; }
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { width: 18px; border: none; background: transparent; }
+QAbstractSpinBox::up-arrow, QAbstractSpinBox::down-arrow { width: 7px; height: 7px; }
+QLineEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus, QComboBox:focus { border: 1px solid #3B82F6; }
+QPlainTextEdit { font-family: "Consolas"; font-size: 9pt; }
+QComboBox QAbstractItemView { background: #14171D; border: 1px solid #2C3240; selection-background-color: #1F2430; }
+"""
+
+
+def label(text="", name=None, wrap=False):
+    widget = QLabel(text)
+    if name:
+        widget.setObjectName(name)
+    widget.setWordWrap(wrap)
+    return widget
+
+
+def card(title=None):
+    frame = QFrame()
+    frame.setObjectName("card")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(18, 16, 18, 18)
+    layout.setSpacing(10)
+    if title:
+        layout.addWidget(label(title, "cardTitle"))
+    return frame, layout
+
+
+def dot(color):
+    widget = QLabel()
+    widget.setFixedSize(9, 9)
+    widget.setStyleSheet(f"background: {color}; border-radius: 4px;")
+    return widget
+
+
+def set_dot(widget, color):
+    style = f"background: {color}; border-radius: 4px;"
+    if widget.styleSheet() != style:
+        widget.setStyleSheet(style)
+
+
+def set_variant(widget, name):
+    """Switch a widget to another style (object name) only when it changes."""
+    if widget.objectName() != name:
+        widget.setObjectName(name)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+
+def to_pixmap(image, width, height):
+    image = image.copy()
+    qimage = QImage(image.data, image.shape[1], image.shape[0], image.strides[0], QImage.Format.Format_BGR888)
+    return QPixmap.fromImage(qimage).scaled(width, height, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+
+class Tile(QFrame):
+    """One camera: picture, name, address, status, frontal choice."""
+
+    def __init__(self, number, on_frontal):
+        super().__init__()
+        self.setObjectName("tile")
+        self.camera = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 12)
+        layout.setSpacing(6)
+        self.picture = label("no camera", "picture")
+        self.picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.picture.setMinimumSize(240, 150)
+        self.picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self.picture, 1)
+        top = QHBoxLayout()
+        self.name = label(f"Camera {number}", "cardTitle")
+        self.badge = label("FRONTAL", "badge")
+        self.badge.hide()
+        top.addWidget(self.name)
+        top.addWidget(self.badge)
+        top.addStretch()
+        self.frontal_button = QPushButton("Use as frontal")
+        self.frontal_button.clicked.connect(lambda: on_frontal(self.camera))
+        self.frontal_button.setEnabled(False)
+        top.addWidget(self.frontal_button)
+        layout.addLayout(top)
+        self.address = label("", "small")
+        layout.addWidget(self.address)
+        status = QHBoxLayout()
+        self.dot = dot(MUTED)
+        self.status = label("empty slot", "muted")
+        status.addWidget(self.dot)
+        status.addWidget(self.status, 1)
+        layout.addLayout(status)
+
+    def show_camera(self, camera, frontal):
+        self.camera = camera
+        self.frontal_button.setEnabled(camera is not None and not frontal)
+        self.badge.setVisible(frontal)
+        set_variant(self, "tileFrontal" if frontal else "tile")
+        if camera is None:
+            self.address.setText("")
+            self.status.setText("empty slot")
+            set_dot(self.dot, MUTED)
+            self.picture.setPixmap(QPixmap())
+            self.picture.setText("no camera")
+            return
+        product = f"{camera.product}  |  " if camera.product else ""
+        self.address.setText(f"{product}ID {camera.device_id}  |  {camera.address}")
+        text = camera.status + (f"  |  {camera.fps:.0f} fps" if camera.status == "streaming" else "")
+        self.status.setText(text)
+        color = {"streaming": OK, "found": ACCENT, "connecting": WARN}.get(camera.status, BAD if camera.status.startswith(("error", "in use")) else MUTED)
+        set_dot(self.dot, color)
+        if camera.preview is not None and camera.status == "streaming":
+            self.picture.setPixmap(to_pixmap(camera.preview, self.picture.width(), self.picture.height()))
+        else:
+            self.picture.setPixmap(QPixmap())
+            self.picture.setText(camera.status)
+
+
+class Hub(QMainWindow):
+    def __init__(self, webcam):
+        super().__init__()
+        self.webcam = webcam
+        self.settings = dict(DEFAULTS)
+        if SETTINGS.exists():
+            self.settings.update(json.loads(SETTINGS.read_text()))
+        self.log_lines = collections.deque(maxlen=300)
+        self.cameras, self.searching = [], False
+        self.frontal = tracking.FrontalFrames()
+        self.vision_store = vision.FrameStore()
+        self.tracker = self.describer = self.sender = None
+        self.vision_state = "off"
+        self.ollama = OllamaServer()
+        self.ollama_state = None
+        self.ollama.start()
+
+        self.setWindowTitle("MRLab Hub")
+        self.resize(1360, 860)
+        root = QWidget()
+        self.setCentralWidget(root)
+        row = QHBoxLayout(root)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(self.build_sidebar())
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.build_cameras())
+        self.pages.addWidget(self.build_tracking())
+        self.pages.addWidget(self.build_vision())
+        row.addWidget(self.pages, 1)
+        self.select_page(0)
+
+        self.timer = QTimer(self, interval=100, timeout=self.refresh)
+        self.timer.start()
+        self.slow_timer = QTimer(self, interval=2000, timeout=self.check_ollama)
+        self.slow_timer.start()
+        self.check_ollama()
+        self.search()
+
+    # ---------- layout ----------
+
+    def build_sidebar(self):
+        side = QFrame()
+        side.setObjectName("sidebar")
+        side.setFixedWidth(220)
+        layout = QVBoxLayout(side)
+        layout.setContentsMargins(16, 22, 16, 18)
+        layout.setSpacing(4)
+        layout.addWidget(label("MRLab Hub", "brand"))
+        layout.addWidget(label("Tracking PC", "muted"))
+        layout.addSpacing(22)
+        self.nav = []
+        for index, name in enumerate(["Cameras", "Tracking", "Vision"]):
+            button = QPushButton(name)
+            button.setObjectName("nav")
+            button.setCheckable(True)
+            button.clicked.connect(lambda _, i=index: self.select_page(i))
+            layout.addWidget(button)
+            self.nav.append(button)
+        layout.addStretch()
+        self.side_status = {}
+        for key in ["Cameras", "Tracking", "Vision", "Model"]:
+            line = QHBoxLayout()
+            indicator = dot(MUTED)
+            text = label(key, "small")
+            line.addWidget(indicator)
+            line.addWidget(text, 1)
+            layout.addLayout(line)
+            self.side_status[key] = (indicator, text)
+        return side
+
+    def page(self, title, subtitle):
+        widget = QWidget()
+        widget.setObjectName("page")
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+        head = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        titles.addWidget(label(title, "title"))
+        sub = label(subtitle, "muted")
+        titles.addWidget(sub)
+        head.addLayout(titles)
+        head.addStretch()
+        layout.addLayout(head)
+        return widget, layout, head, sub
+
+    def build_cameras(self):
+        widget, layout, head, self.cameras_sub = self.page("Cameras", "Searching...")
+        self.search_button = QPushButton("Search")
+        self.search_button.clicked.connect(self.search)
+        self.connect_button = QPushButton("Connect")
+        self.connect_button.setObjectName("primary")
+        self.connect_button.clicked.connect(self.connect_cameras)
+        self.disconnect_button = QPushButton("Disconnect")
+        self.disconnect_button.clicked.connect(self.disconnect_cameras)
+        for button in (self.search_button, self.disconnect_button, self.connect_button):
+            head.addWidget(button)
+        layout.addWidget(label("Moverse must be closed: it holds the cameras. Choose the camera on top of the wall "
+                               "as frontal; it feeds tracking and vision.", "muted", wrap=True))
+        grid = QGridLayout()
+        grid.setSpacing(14)
+        self.tiles = []
+        for i in range(8):
+            tile = Tile(i + 1, self.use_as_frontal)
+            grid.addWidget(tile, i // 4, i % 4)
+            self.tiles.append(tile)
+        layout.addLayout(grid, 1)
+        return widget
+
+    def number_field(self, key, low, high, decimals=1, step=1.0, integer=False):
+        field = QSpinBox() if integer else QDoubleSpinBox()
+        field.setRange(low, high)
+        if not integer:
+            field.setDecimals(decimals)
+            field.setSingleStep(step)
+        field.setValue(self.settings[key])
+        # Hidden arrow buttons (NoButtons) would shrink the number to 1 pixel under this style sheet (Qt 6.12),
+        # so the arrows stay, styled away.
+        field.editingFinished.connect(lambda: self.change(key, field.value()))
+        return field
+
+    def address_field(self):
+        field = QLineEdit(self.settings["unreal_address"])
+        field.setPlaceholderText("address of the PC that runs Unreal")
+        field.editingFinished.connect(lambda: self.change("unreal_address", field.text().strip()))
+        self.address_fields.append(field)
+        return field
+
+    def build_tracking(self):
+        self.address_fields = []
+        widget, layout, head, _ = self.page("Tracking", "Head position from the frontal camera, sent to Unreal in Moverse's format")
+        self.track_button = QPushButton("Start tracking")
+        self.track_button.setObjectName("primary")
+        self.track_button.clicked.connect(self.toggle_tracking)
+        head.addWidget(self.track_button)
+        body = QHBoxLayout()
+        body.setSpacing(16)
+
+        settings, form_box = card("Settings")
+        form = QFormLayout()
+        form.setSpacing(9)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form.addRow("Unreal PC", self.address_field())
+        form.addRow("Moverse port", self.number_field("moverse_port", 0, 65535, integer=True))
+        form_box.addLayout(form)
+        form_box.addWidget(label("Frontal camera in tracking space (cm; X towards the wall, Y to the right seen "
+                                 "facing the wall, Z up)", "small", wrap=True))
+        pose = QFormLayout()
+        pose.setSpacing(9)
+        for key, name in [("camera_x", "X"), ("camera_y", "Y"), ("camera_z", "Z (height)")]:
+            pose.addRow(name, self.number_field(key, -2000, 2000))
+        for key, name in [("camera_pitch", "Tilt down (deg)"), ("camera_yaw", "Turn to +Y (deg)"), ("camera_roll", "Roll (deg)")]:
+            pose.addRow(name, self.number_field(key, -180, 180))
+        form_box.addLayout(pose)
+        form_box.addWidget(label("Smoothing (One Euro filter): lower min cutoff = calmer when still, "
+                                 "higher beta = less lag when moving", "small", wrap=True))
+        smooth = QFormLayout()
+        smooth.addRow("Min cutoff (Hz)", self.number_field("filter_min_cutoff", 0.01, 20, 2, 0.1))
+        smooth.addRow("Beta", self.number_field("filter_beta", 0, 5, 3, 0.01))
+        form_box.addLayout(smooth)
+        form_box.addStretch()
+        settings.setFixedWidth(360)
+        body.addWidget(settings)
+
+        live, live_box = card("Frontal camera")
+        self.track_picture = label("no frontal camera streaming", "picture")
+        self.track_picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.track_picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        live_box.addWidget(self.track_picture, 1)
+        numbers = QGridLayout()
+        self.track_values = {}
+        for column, key in enumerate(["X", "Y", "Z", "Rate"]):
+            numbers.addWidget(label(key if key != "Rate" else "Rate (Hz)", "small"), 0, column)
+            value = label("-", "value")
+            numbers.addWidget(value, 1, column)
+            self.track_values[key] = value
+        live_box.addLayout(numbers)
+        self.track_info = label("", "muted", wrap=True)
+        live_box.addWidget(self.track_info)
+        body.addWidget(live, 1)
+        layout.addLayout(body, 1)
+        return widget
+
+    def build_vision(self):
+        widget, layout, head, _ = self.page("Vision", "Local vision model; Frank gets a description of the people in front of the wall")
+        self.vision_button = QPushButton("Start vision")
+        self.vision_button.setObjectName("primary")
+        self.vision_button.clicked.connect(self.toggle_vision)
+        head.addWidget(self.vision_button)
+        top = QHBoxLayout()
+        top.setSpacing(16)
+
+        model, model_box = card("Model")
+        self.ollama_line = label("Ollama: checking...", "muted", wrap=True)
+        model_box.addWidget(self.ollama_line)
+        self.model_choice = QComboBox()
+        self.model_choice.addItem(self.settings["model"])
+        self.model_choice.currentTextChanged.connect(lambda text: text and self.change("model", text))
+        model_box.addWidget(self.model_choice)
+        self.model_memory = label("", "small", wrap=True)
+        model_box.addWidget(self.model_memory)
+        model_box.addStretch()
+        model.setFixedWidth(360)
+        top.addWidget(model)
+
+        send, send_box = card("Sending to Unreal")
+        form = QFormLayout()
+        form.addRow("Unreal PC", self.address_field())
+        form.addRow("Vision port", self.number_field("vision_port", 0, 65535, integer=True))
+        send_box.addLayout(form)
+        self.vision_info = label("", "muted", wrap=True)
+        send_box.addWidget(self.vision_info)
+        send_box.addStretch()
+        top.addWidget(send, 1)
+        layout.addLayout(top)
+
+        view, view_box = card("What Frank sees")
+        self.view_text = QPlainTextEdit()
+        self.view_text.setReadOnly(True)
+        view_box.addWidget(self.view_text)
+        layout.addWidget(view, 1)
+        logs, log_box = card("Log")
+        self.log_text = QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        log_box.addWidget(self.log_text)
+        layout.addWidget(logs, 1)
+        return widget
+
+    def select_page(self, index):
+        self.pages.setCurrentIndex(index)
+        for i, button in enumerate(self.nav):
+            button.setChecked(i == index)
+
+    # ---------- actions ----------
+
+    def log(self, text):
+        self.log_lines.append(f"{time.strftime('%H:%M:%S')} {text}")
+
+    def change(self, key, value):
+        if self.settings.get(key) == value:
+            return
+        self.settings[key] = value
+        SETTINGS.write_text(json.dumps(self.settings, indent=1))
+        if key == "unreal_address":
+            for field in self.address_fields:
+                field.setText(value)
+        if self.tracker and key not in ("vision_port", "model", "frontal_id"):
+            self.stop_tracking()
+            self.start_tracking()
+        if self.describer and key in ("unreal_address", "vision_port", "model"):
+            self.stop_vision()
+            self.start_vision()
+
+    def search(self):
+        if self.searching:
+            return
+        self.disconnect_cameras()
+        self.searching = True
+        self.cameras_sub.setText("Searching for cameras...")
+
+        def work():
+            found, error = cameras.search(include_webcam=self.webcam)
+            if error:
+                self.log(f"camera search failed: {error}")
+            self.cameras = found[:8]
+            self.searching = False
+            self.log(f"found {len(found)} camera(s)")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def connect_cameras(self):
+        for camera in self.cameras:
+            if camera.worker is None and camera.state == "available":
+                self.start_worker(camera)
+
+    def start_worker(self, camera):
+        frontal = camera.device_id == self.settings["frontal_id"]
+        camera.worker = cameras.CameraWorker(camera, self.frontal if frontal else None,
+                                             self.vision_store if frontal else None, self.log)
+        camera.worker.start()
+
+    def stop_worker(self, camera):
+        if camera.worker is not None:
+            camera.worker.running = False
+            camera.worker.join(timeout=5)
+            camera.worker = None
+            camera.status, camera.preview = "found", None
+
+    def disconnect_cameras(self):
+        self.stop_tracking()
+        self.stop_vision()
+        for camera in self.cameras:
+            self.stop_worker(camera)
+
+    def use_as_frontal(self, camera):
+        old = next((c for c in self.cameras if c.device_id == self.settings["frontal_id"]), None)
+        self.change("frontal_id", camera.device_id)
+        self.frontal.intrinsics = None
+        for c in (old, camera):  # reconnect both, so the new frontal camera also sends depth
+            if c is not None and c.worker is not None:
+                self.stop_worker(c)
+                self.start_worker(c)
+
+    def frontal_streaming(self):
+        return any(c.device_id == self.settings["frontal_id"] and c.status == "streaming" for c in self.cameras)
+
+    def toggle_tracking(self):
+        if self.tracker:
+            self.stop_tracking()
+        else:
+            self.start_tracking()
+
+    def start_tracking(self):
+        s = self.settings
+        if not (s["unreal_address"] and s["moverse_port"] and self.frontal_streaming()):
+            self.log("tracking needs the frontal camera streaming, the Unreal PC address and the Moverse port")
+            return
+        self.tracker = tracking.Tracker(self.frontal, dict(s), self.log)
+        self.tracker.start()
+        self.log(f"tracking started, sending to {s['unreal_address']}:{s['moverse_port']}")
+
+    def stop_tracking(self):
+        if self.tracker:
+            self.tracker.running = False
+            self.tracker = None
+            self.log("tracking stopped")
+
+    def toggle_vision(self):
+        if self.describer or self.vision_state == "loading":
+            self.stop_vision()
+        else:
+            self.start_vision()
+
+    def start_vision(self):
+        s = self.settings
+        if not (s["unreal_address"] and s["vision_port"] and self.frontal_streaming()):
+            self.log("vision needs the frontal camera streaming, the Unreal PC address and the vision port")
+            return
+        self.vision_state = "loading"
+        self.log(f"loading {s['model']} (the first start in this folder can take a few minutes)")
+
+        def work():
+            try:
+                vision.load_model(s["model"])
+            except (OSError, RuntimeError, ValueError) as error:
+                self.log(f"model did not load: {error}")
+                self.vision_state = "off"
+                return
+            if self.vision_state != "loading":
+                return  # stopped meanwhile
+            self.describer = vision.Describer(self.vision_store, s["model"], self.log)
+            self.sender = vision.Sender(self.vision_store, self.describer, (s["unreal_address"], int(s["vision_port"])), self.log)
+            self.describer.start()
+            self.sender.start()
+            self.vision_state = "on"
+            self.log(f"vision started, sending to {s['unreal_address']}:{s['vision_port']}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def stop_vision(self):
+        if self.describer:
+            self.describer.running = False
+            self.sender.running = False
+            self.describer = self.sender = None
+            self.log("vision stopped")
+        self.vision_state = "off"
+
+    def check_ollama(self):
+        def work():
+            try:
+                self.ollama_state = OllamaServer.status()
+            except (OSError, RuntimeError, ValueError):
+                self.ollama_state = None
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- refresh ----------
+
+    def refresh(self):
+        for i, tile in enumerate(self.tiles):
+            camera = self.cameras[i] if i < len(self.cameras) else None
+            tile.show_camera(camera, camera is not None and camera.device_id == self.settings["frontal_id"])
+        streaming = sum(c.status == "streaming" for c in self.cameras)
+        if not self.searching:
+            self.cameras_sub.setText(f"{len(self.cameras)} of 8 found  |  {streaming} streaming")
+        self.connect_button.setEnabled(not self.searching and any(c.worker is None and c.state == "available" for c in self.cameras))
+        self.disconnect_button.setEnabled(any(c.worker is not None for c in self.cameras))
+        self.search_button.setEnabled(not self.searching)
+        self.refresh_tracking()
+        self.refresh_vision()
+        self.refresh_sidebar(streaming)
+
+    def refresh_tracking(self):
+        with self.frontal.lock:
+            color = self.frontal.color
+        tracker = self.tracker
+        if color is not None and self.frontal_streaming() and self.pages.currentIndex() == 1:
+            image = cv2.resize(color[0], (640, 640 * color[0].shape[0] // color[0].shape[1]))
+            if tracker and tracker.face:
+                scale = 640 / color[0].shape[1]
+                x, y, w, h = (int(v * scale) for v in tracker.face)
+                cv2.rectangle(image, (x, y), (x + w, y + h), (246, 130, 59), 2)
+            self.track_picture.setPixmap(to_pixmap(image, self.track_picture.width(), self.track_picture.height()))
+        position = tracker.position if tracker else None
+        for key, index in (("X", 0), ("Y", 1), ("Z", 2)):
+            self.track_values[key].setText(f"{position[index]:.1f}" if position is not None else "-")
+        self.track_values["Rate"].setText(f"{tracker.rate:.0f}" if tracker else "-")
+        if tracker:
+            seen = f"face found, distance from {tracker.distance_from}" if tracker.face else "no face"
+            self.track_info.setText(f"{seen}  |  {tracker.sent} packets sent to {self.settings['unreal_address']}:{self.settings['moverse_port']}")
+        else:
+            self.track_info.setText("Stopped. Moverse must not run at the same time (both would send to the same port).")
+        self.track_button.setText("Stop tracking" if tracker else "Start tracking")
+        set_variant(self.track_button, "stop" if tracker else "primary")
+
+    def refresh_vision(self):
+        state = self.ollama_state
+        if state is None:
+            self.ollama_line.setText(f"Ollama at {OllamaServer.address()}: not reachable" + (" (starting...)" if self.ollama.own else ""))
+        else:
+            own = "own server" if self.ollama.own else "server already running"
+            self.ollama_line.setText(f"Ollama {state['version']} at {OllamaServer.address()} ({own})")
+            current = self.model_choice.currentText()
+            if state["models"] and [self.model_choice.itemText(i) for i in range(self.model_choice.count())] != state["models"]:
+                self.model_choice.blockSignals(True)
+                self.model_choice.clear()
+                self.model_choice.addItems(state["models"])
+                self.model_choice.setCurrentText(current if current in state["models"] else state["models"][0])
+                self.model_choice.blockSignals(False)
+            loaded = state["loaded"].get(self.settings["model"])
+            self.model_memory.setText(f"loaded, {loaded / 1e9:.1f} GB on the GPU" if loaded else "not loaded yet (loads when vision starts)")
+        describer, sender = self.describer, self.sender
+        if describer and describer.view:
+            v = describer.view
+            text = v["description"].replace("; ", ";\n    ").replace(". Person", ".\nPerson")
+            if self.view_text.toPlainText() != text:
+                self.view_text.setPlainText(text)
+            self.vision_info.setText(f"view {v['seq']}  |  model {v['model_ms']} ms  |  {sender.sent} packets sent"
+                                     + (f"  |  last error: {describer.error}" if describer.error else ""))
+        elif self.vision_state == "loading":
+            self.vision_info.setText("loading the model...")
+        elif describer:
+            self.vision_info.setText("waiting for the first description" + (f"  |  last error: {describer.error}" if describer.error else ""))
+        else:
+            self.vision_info.setText("Stopped.")
+        running = self.vision_state != "off"
+        self.vision_button.setText("Stop vision" if running else "Start vision")
+        set_variant(self.vision_button, "stop" if running else "primary")
+        lines = list(self.log_lines) + [f"ollama: {line}" for line in list(self.ollama.log)[-5:]]
+        text = "\n".join(lines[-60:])
+        if self.log_text.toPlainText() != text:
+            self.log_text.setPlainText(text)
+            self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+
+    def refresh_sidebar(self, streaming):
+        model_ready = self.ollama_state is not None and self.settings["model"] in self.ollama_state["loaded"]
+        rows = {
+            "Cameras": (f"Cameras  {streaming}/8 streaming", OK if streaming else MUTED),
+            "Tracking": ("Tracking  on" if self.tracker else "Tracking  off", OK if self.tracker else MUTED),
+            "Vision": (f"Vision  {self.vision_state}", OK if self.vision_state == "on" else WARN if self.vision_state == "loading" else MUTED),
+            "Model": ("Model  ready" if model_ready else "Model  not loaded", OK if model_ready else MUTED),
+        }
+        for key, (text, color) in rows.items():
+            indicator, line = self.side_status[key]
+            line.setText(text)
+            set_dot(indicator, color)
+
+    def closeEvent(self, event):
+        self.disconnect_cameras()
+        self.ollama.stop()
+        super().closeEvent(event)
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyleSheet(STYLE)
+    window = Hub(webcam="--webcam" in sys.argv)
+    window.show()
+    sys.exit(app.exec())

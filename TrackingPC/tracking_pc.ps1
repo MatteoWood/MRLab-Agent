@@ -33,7 +33,7 @@ $OllamaAddress = '127.0.0.1:11435'  # its own port, so an Ollama installed on th
 $Settings = Join-Path $Here 'mrlab_camera_service.local.json'
 
 $PythonUrl = 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip'
-$Wheels = @(@('numpy', '2.2.6'), @('opencv-python', '4.12.0.88'), @('depthai', '3.12.0'))
+$Wheels = @(@('numpy', '2.2.6'), @('opencv-python', '4.12.0.88'), @('depthai', '3.12.0'), @('shiboken6', '6.12.0'), @('PySide6-Essentials', '6.12.0'))
 $OllamaVersion = 'v0.40.15'
 
 function Title($Text) { Write-Host "`n== $Text" -ForegroundColor Cyan }
@@ -67,6 +67,21 @@ function Expand-Zip($Zip, $Destination) {
     New-Item -ItemType Directory -Force $Destination | Out-Null
     & tar.exe -xf $Zip -C $Destination
     if ($LASTEXITCODE -ne 0) { throw "Could not unpack $Zip" }
+}
+
+function Move-WheelData {
+    # Files in a wheel's <name>.data\platlib or purelib belong in site-packages itself, as pip installs them
+    # (depthai keeps its DLLs there).
+    Get-ChildItem $SitePackages -Directory -Filter '*.data' | ForEach-Object {
+        foreach ($kind in 'platlib', 'purelib') {
+            $dir = Join-Path $_.FullName $kind
+            if (Test-Path $dir) {
+                & robocopy.exe $dir $SitePackages /E /MOVE /NFL /NDL /NJH /NJS /NP | Out-Null
+                if ($LASTEXITCODE -ge 8) { throw "Could not move the files of $($_.Name)" }
+            }
+        }
+        Remove-Item $_.FullName -Recurse -Force
+    }
 }
 
 function Get-Ollama {
@@ -137,8 +152,8 @@ switch ($Action) {
             $zip = Join-Path $Downloads 'python.zip'
             Get-File $PythonUrl $zip
             Expand-Zip $zip $PythonDir
-            # The portable Python only searches the folders listed in this file.
-            Set-Content -Encoding ASCII (Join-Path $PythonDir 'python311._pth') @('python311.zip', '.', 'Lib\site-packages')
+            # The portable Python only searches the folders listed in this file; ..\.. is this folder (the hub's code).
+            Set-Content -Encoding ASCII (Join-Path $PythonDir 'python311._pth') @('python311.zip', '.', 'Lib\site-packages', '..\..')
             Remove-Item $zip
         }
         New-Item -ItemType Directory -Force $SitePackages | Out-Null
@@ -155,6 +170,7 @@ switch ($Action) {
             Get-File $file.url $path
             if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $file.digests.sha256) { throw "Checksum of $($file.filename) does not match PyPI" }
             Expand-Zip $path $SitePackages  # a wheel is a zip file; unpacked it is the installed package
+            Move-WheelData
             Remove-Item $path
             'ready'
         }
@@ -183,7 +199,7 @@ switch ($Action) {
         'ready'
 
         Title 'Check that the Python packages load'
-        & $Python -c "import numpy, cv2, depthai; print('numpy', numpy.__version__, '| opencv', cv2.__version__, '| depthai', depthai.__version__)"
+        & $Python -c "import numpy, cv2, depthai, PySide6; print('numpy', numpy.__version__, '| opencv', cv2.__version__, '| depthai', depthai.__version__, '| PySide6', PySide6.__version__)"
         if ($LASTEXITCODE -ne 0) { throw 'The Python packages do not load' }
         Title 'Setup done'
     }

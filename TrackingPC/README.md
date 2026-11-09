@@ -1,61 +1,63 @@
-# Tracking PC tools: Frank's eyes
+# MRLab Hub (tracking PC)
 
-These files run on the tracking PC (the PC with the 8 OAK cameras). They read the frontal camera,
-describe the people in front of the wall with a local vision model, and send that text to the PC
-that runs Unreal. How it works: section 4.12 of the main README.
+The program for the tracking PC (the PC with the 8 OAK cameras). It replaces the Moverse hub while
+Frank runs: it shows the cameras, tracks the visitor's head for the wall's 3D view, and describes
+the people in front of the wall for Frank. Main README: section 4.12 (vision) and Step 8.
+
+## Two parts
+| Part | Where | Changes |
+|---|---|---|
+| Code: `MRLabHub.exe`, `hub\`, `launcher\`, scripts | Git (this folder) | often; copy the new files over the old ones |
+| `runtime\`: portable Python with its packages, Ollama, the vision model (about 6.7 GB) | USB stick, not in Git | once |
+
+The hub only runs when both are together: `runtime\` must sit next to `MRLabHub.exe`.
+To build `runtime\` again (on a PC with internet): `2_setup.bat` downloads everything into it.
 
 ## Rule: nothing outside this folder (D63)
-- Everything the tools need (Python, its packages, Ollama, the vision model) is downloaded into
-  `runtime\` inside this folder. Nothing is installed, no setting of the PC is changed.
-- Every program started by the tools gets its home, AppData and temp folders inside `runtime\`
-  (`env.bat`), so caches and logs (Ollama, the NVIDIA driver, PowerShell) also stay here.
-- The camera service only reads the camera and sends UDP packets out; it opens no port, so the
-  firewall needs no change.
-- To remove everything: close the windows and delete this folder.
-- Windows itself still notes that programs ran (for example its Prefetch folder); that is outside
-  the tools' control.
+- Nothing is installed and no setting of the PC is changed. Everything stays in this folder.
+- `MRLabHub.exe` starts the hub with home, AppData and temp folders inside `runtime\`, so the caches and
+  logs of the hub, Ollama, the camera library and the NVIDIA driver also stay here (checked on the laptop).
+- The hub only sends (UDP) to the Unreal PC; it opens no port, so the firewall needs no change.
+- Its settings are saved in `hub.local.json` in this folder (not in Git).
+- To remove everything: close the hub and delete this folder.
+- Windows itself still notes that programs ran (for example its Prefetch folder); outside our control.
 
-## Procedure
-Copy this folder to the tracking PC (for example to the desktop or a USB stick). Double-click the
-numbered files in order. Each opens a window and waits for a key at the end; copy what it shows
-to Claude.
+## Procedure in the lab
+1. Copy this whole folder (with `runtime\`) from the USB stick to the tracking PC, for example to the desktop.
+2. Close Moverse (it holds the cameras and the graphics card).
+3. On the Unreal PC: `git pull`; write the port for Frank's view into `Saved\VisionPort.txt` (one line,
+   any free port, not the Moverse port). Start Play or nDisplay Launch.
+4. Double-click `MRLabHub.exe`.
+   - **Cameras**: the hub searches at start (Search to repeat). Each tile shows ID, address and state
+     ("found", "in use by another program" = Moverse still running). Press **Connect**: the pictures
+     appear. On the camera on top of the wall press **Use as frontal** (blue frame).
+   - **Vision**: enter the Unreal PC's address and the port from step 3, press **Start vision**. The first
+     start in a new folder loads the model for a few minutes ("loading the model"). Then "What Frank sees"
+     shows the description; the Unreal log shows "Camera service: first view from ...". Talk to Frank.
+   - **Tracking** (first version, never tested with an OAK): enter the Unreal PC's address and the
+     Moverse port (the one in Unreal's Moverse preset), and the frontal camera's position and tilt in
+     tracking space (measure them; the defaults are a guess). Press **Start tracking**: the face gets a
+     box, X/Y/Z show the head position, and `NDC_Basic` on the Unreal PC moves the view as with Moverse.
+     Moverse must not run at the same time.
+5. Copy the **Log** (Vision page) to Claude when something does not work.
+6. Close the hub window (it also stops its Ollama). Start Moverse again if needed.
 
-1. `1_check_pc.bat`: read-only report: Windows, graphics card and what uses it, free disk space,
-   whether Moverse runs, the PC's network addresses, internet access, setup state.
-   Needs: about 9 GB free while setting up (7 GB after); internet for step 2.
-2. **Close Moverse** (it holds the cameras and the graphics card).
-3. `2_setup.bat`: downloads into `runtime\` (checksums checked): portable Python 3.11.9 (11 MB),
-   numpy, opencv-python, depthai (about 130 MB), Ollama (1.6 GB), the vision model
-   `qwen3.5:4b` (3.3 GB). Run it again if it stops; it continues where it stopped.
-4. `3_find_cameras.bat`: lists the OAK cameras with ID, address and state, then shows one picture
-   of each. Note the ID of the camera on top of the wall (the one looking at the visitors).
-   If it finds no camera: is Moverse closed? If you know the camera addresses (for example from
-   Moverse's settings), run it from a command window with them: `3_find_cameras.bat <address> <address>`.
-5. On the PC that runs Unreal: `git pull`; write the port number the packets should go to into
-   `Saved\VisionPort.txt` (one line; any free port, not the Moverse port). Start Play or nDisplay
-   Launch. The log (`LogMRLabLive`) shows "Listening for the camera service on UDP port ...".
-6. `4_run.bat`: asks once for the Unreal PC's address and port (`address:port`) and the camera ID
-   from step 4 (saved in `mrlab_camera_service.local.json` here, not in Git), starts the vision
-   model (a minimized "ollama" window) and the camera service. The first start loads the model and
-   can take a few minutes. Then each new description is printed, for example
-   `view 3 (model 900 ms): Person 1: position: centre, near; clothes: ...`.
-   The Unreal log shows "Camera service: first view from ...". Then talk to Frank.
-7. To stop: Ctrl+C in the `4_run.bat` window (it also stops Ollama). Start Moverse again if needed.
-
-## If something fails
-- A step stops with an error: copy the whole window text to Claude.
-- Unreal never logs "first view from": the packets do not arrive. Check the address and port in
-  `mrlab_camera_service.local.json` (delete the file to be asked again) and `Saved\VisionPort.txt`;
-  then the Unreal PC's firewall (Q29). Frank says he cannot see while no views arrive.
-- To change the settings: delete `mrlab_camera_service.local.json`; `4_run.bat` asks again.
+## If the hub does not start
+- A message box with an error: the text is also saved in `runtime\temp\hub_error.txt`; send it to Claude.
+- "The runtime folder is missing": `runtime\` is not next to `MRLabHub.exe`.
+- Console fallback without a window: `1_check_pc.bat` (read-only report about the PC),
+  `3_find_cameras.bat` (lists the cameras, one picture of each), `4_run.bat` (vision only, asks for the
+  Unreal PC address:port and the camera ID once). They use the same `runtime\`.
 
 ## Files
 | File | What it does |
 |---|---|
-| `1_check_pc.bat` ... `4_run.bat` | The steps above; each calls `env.bat` and `tracking_pc.ps1` |
-| `env.bat` | Points home, AppData and temp of the window to `runtime\` |
-| `tracking_pc.ps1` | The actions check, setup, cameras, run |
-| `find_cameras.py` | Lists the OAK cameras and shows one picture of each (read only) |
-| `mrlab_camera_service.py` | The camera service (also runs on a laptop with `--source webcam`) |
-| `mrlab_camera_service.local.json` | Local settings, written by `4_run.bat`, not in Git |
-| `runtime\` | Everything downloaded and every cache, not in Git |
+| `MRLabHub.exe` | Starts the hub (`launcher\MRLabHub.cs`, built by `launcher\build.bat` with the C# compiler that is part of Windows) |
+| `hub\app.py` | The window: Cameras, Tracking, Vision |
+| `hub\cameras.py` | Search, connect, stream (frontal camera: colour 1280x800 and depth; others: small preview) |
+| `hub\tracking.py` | Head tracker: face, distance, tracking space, smoothing, Moverse packets |
+| `hub\vision.py` | Description of the people with the local model, sent to Unreal |
+| `hub\ollama.py` | Starts and stops the hub's own Ollama |
+| `mrlab_camera_service.py` | Vision without a window (also for the laptop: `--source webcam`) |
+| `1_check_pc.bat` ... `4_run.bat`, `env.bat`, `tracking_pc.ps1`, `find_cameras.py` | Console tools and `2_setup.bat`, which builds `runtime\` |
+| `hub.local.json`, `mrlab_camera_service.local.json` | Local settings, not in Git |
