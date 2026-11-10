@@ -1,22 +1,25 @@
 """Head tracker with all calibrated cameras (Step 8B).
 
 The cameras only deliver pictures. In each camera's helper program (hub/cameras.py) the pose model
-(YOLO11 nano pose, hub/pose.py, on this PC's graphics card) finds the people and their body points. Here,
-for every person a camera sees, the head point in the picture (the middle of the eyes; if not both eyes
-are visible, the middle of the visible face points: nose, eyes, ears) becomes a line of sight in the room,
-from the camera's lens (factory calibration) and its position (the hub's calibration, hub/calibration.py).
-Where the lines of sight of several cameras meet is the head: the point closest to all of them, each
-weighted by 1 / distance squared (a far camera's line is less sure). Eye lines are used when at least
-two cameras see both eyes, else all face lines. One camera alone gives no position (no depth is used):
-the person keeps their last position for up to LOST_AFTER seconds.
-People across cameras: a person found before is looked for along each camera's lines (within TRACK_GATE
-of their last position); the remaining lines are paired where two cameras' lines nearly cross (within
-GATE) at a head height, then joined by other cameras' lines passing as close. Each person keeps a number
-while seen. The main person (clicked in the window, else the one nearest to the wall) is smoothed with a
-One Euro filter and sent to the Unreal PC in Moverse's packet format (subject Actor0, 25 moverserig bones,
-head at the point) at every update, so the Moverse Live Link plugin, NDC_Basic and the gaze work
-unchanged. Pictures older than MAX_AGE are not combined. Moverse must not run at the same time (two
-senders on one port).
+(YOLO11 nano pose, hub/pose.py, on this PC's graphics card) finds the people and their body points. Here
+every face point a camera sees (nose, eyes, ears) becomes a line of sight in the room, from the camera's
+lens and its position (the hub's calibration, hub/calibration.py).
+- People across cameras: a known person takes, from each camera, the person whose head line (through the
+  middle of their visible face points) passes nearest to where they are expected (within MATCH). The rest
+  are paired where two cameras' head lines nearly cross (within NEW_GATE) at a head height. A new person
+  counts only after CONFIRM updates in a row (single wrong matches made extra "people" in the lab), and a
+  new person within MERGE of a known one is that person.
+- Head position: each face point is triangulated on its own (the point nearest to its lines, weighted by
+  the point's confidence and 1 / distance squared; a line further than GATE is dropped), so all cameras
+  aim at the same physical spot. The head is the middle of the two eyes. Without both eyes, the other
+  triangulated points stand in, shifted by their distance from the eyes learned while both were seen, so
+  the position does not jump when the visible points change. No depth is used: a person needs two cameras.
+- Timing: pictures are combined only when taken within SAME_TIME of the newest one, and each line is moved
+  along the person's velocity to that moment.
+- The main person (clicked in the window, else the one nearest to the wall) is smoothed with a One Euro
+  filter and sent to the Unreal PC in Moverse's packet format (subject Actor0, 25 moverserig bones, head
+  at the point) at every update, so the Moverse Live Link plugin, NDC_Basic and the gaze work unchanged.
+  Moverse must not run at the same time (two senders on one port).
 """
 import collections
 import itertools
@@ -26,20 +29,31 @@ import socket
 import threading
 import time
 
+import cv2
 import numpy as np
 
 from hub import calibration, pose
 
 MIN_POINT_CONFIDENCE = 0.5
 FACE = (pose.NOSE, pose.LEFT_EYE, pose.RIGHT_EYE, pose.LEFT_EAR, pose.RIGHT_EAR)
-MAX_AGE = 0.05            # s: older pictures are not combined
-GATE = 15.0               # cm: lines of one head pass at most this far from it
-TRACK_GATE = 30.0         # cm: a known person's head moves less than this between updates
+SAME_TIME = 0.025         # s: pictures combined only when taken this close to the newest one
+GATE = 12.0               # cm: the lines of one face point pass at most this far from it
+MATCH = 35.0              # cm: a known person's head line passes at most this far from where they are expected
+NEW_GATE = 20.0           # cm: two cameras' head lines of a new person pass at most this far apart
+MERGE = 40.0              # cm: a new person this close to a known one is the same person
+CONFIRM = 8               # updates in a row a new person must be found in before they count
 HEAD_HEIGHT = (40.0, 240.0)  # cm above the floor
 MIN_INTERVAL = 1 / 120    # s between updates
-LOST_AFTER = 0.5
-FORGET_AFTER = 2.0        # seconds a person may be unseen and keep their number
-KEEP_CHOSEN = 2.0         # seconds the clicked main person may be unseen before the nearest is followed again
+LOST_AFTER = 0.5          # s: the main person's position is kept this long when nobody locates them
+FORGET_AFTER = 2.0        # s a person may be unseen and keep their number
+KEEP_CHOSEN = 2.0         # s the clicked main person may be unseen before the nearest is followed again
+OFFSET_SMOOTHING = 0.05   # share of a new measurement in a face point's learned distance from the eyes
+AREA_MARGIN = 30.0        # cm: people further outside the area the cameras surround are ignored (reflections)
+NEW_CAMERAS = 3           # cameras that must see a new person at the same moment before they count
+FALLBACK_SHARE = 0.35     # without both eyes the measured head moves the position only this share of the way
+MAX_SPEED = 300.0         # cm/s: a measurement further from the expected spot than this allows (plus
+JUMP_SLACK = 15.0         # cm) is held back,
+HOLD_BACK = 5             # at most this many times in a row
 SUBJECT = "Actor0"
 
 # Moverse rig (from /Game/Actor0/asset): name, parent index, location relative to the parent.
@@ -130,8 +144,6 @@ class OneEuro:
         return self.x
 
 
-
-
 # ---------- lines of sight ----------
 
 def distance_to_line(point, line):
@@ -157,12 +169,14 @@ def crossing(a, b):
 
 
 def closest_point(lines):
-    """Point nearest to all lines of sight, each weighted by 1 / distance squared (two passes), or None."""
+    """Point nearest to the lines, each weighted by its weight, then also by 1 / distance squared, or None."""
     point = None
     for _ in range(2):
         a, b = np.zeros((3, 3)), np.zeros(3)
         for line in lines:
-            weight = 1.0 if point is None else 1.0 / max(1.0, float(np.linalg.norm(point - line["origin"]))) ** 2
+            weight = line["weight"]
+            if point is not None:
+                weight /= max(1.0, float(np.linalg.norm(point - line["origin"])) / 100.0) ** 2
             p = np.eye(3) - np.outer(line["direction"], line["direction"])
             a += weight * p
             b += weight * p @ line["origin"]
@@ -172,23 +186,51 @@ def closest_point(lines):
     return point
 
 
+def robust_point(lines):
+    """One face point from its lines of sight: drop the furthest line while it passes further than GATE
+    (keeping two or more); None when the lines do not meet within GATE."""
+    lines = list(lines)
+    while len(lines) >= 2:
+        point = closest_point(lines)
+        if point is None:
+            return None
+        gaps = [distance_to_line(point, line) for line in lines]
+        worst = int(np.argmax(gaps))
+        if gaps[worst] <= GATE:
+            return point
+        if len(lines) == 2:
+            return None
+        lines.pop(worst)
+    return None
+
+
 class Tracker(threading.Thread):
     def __init__(self, cameras, poses, settings, log=print):
-        """cameras: [Camera] streaming; poses: {device id: {"number", "rotation", "position"}} (calibration)."""
+        """cameras: [Camera] streaming; poses: {device id: {"number", "rotation", "position", "matrix"}}
+        (calibration)."""
         super().__init__(daemon=True)
         self.settings, self.log = settings, log
         self.running = True
         self.cameras = [c for c in cameras if c.device_id in poses and c.lens and c.worker]
         self.poses = {c.device_id: (int(poses[c.device_id]["number"]), np.array(poses[c.device_id]["rotation"]),
                                     np.array(poses[c.device_id]["position"])) for c in self.cameras}
+        # the focal length and picture centre measured in the calibration (older calibrations: the camera's own)
+        self.lenses = {c.device_id: dict(c.lens, matrix=poses[c.device_id].get("matrix", c.lens["matrix"])) for c in self.cameras}
+        # The area the cameras surround (seen from above): people outside it are reflections or objects.
+        corners = np.array([pose_["position"][:2] for pose_ in poses.values()], np.float32)
+        self.area = cv2.convexHull(corners) if len(corners) >= 3 else None
         self.wake = threading.Condition()
-        self.views = {}        # device id -> (capture time, [lines of sight]), newest picture per camera
-        self.tracks = {}       # number -> {"position", "seen", "cameras"} (also unseen for up to FORGET_AFTER)
+        self.views = {}        # device id -> (capture time, [people seen]), newest picture per camera
+        self.version = 0       # counts the pictures that came in
+        self.used = -1         # version of the last update
+        self.tracks = {}       # number -> person (also not confirmed ones, and unseen for up to FORGET_AFTER)
         self.next_number = 1
         self.main_seen = 0.0   # when the main person was last seen
+        self.smooth = OneEuro(settings["filter_min_cutoff"], settings["filter_beta"])
+        self.last_main, self.last_time, self.last_seen, self.times = None, 0.0, 0.0, []
         # Shown in the window (read by the window's thread):
         self.status = "starting"
-        self.people = []       # [{"number", "position" (cm), "cameras" (numbers)}] seen in the last LOST_AFTER s
+        self.people = []       # [{"number", "position" (cm), "cameras" (numbers)}] confirmed, seen in the last LOST_AFTER s
         self.main = None       # number of the main person, whose head is sent
         self.chosen = False    # main person chosen by a click (else: automatic, nearest to the wall)
         self.position = None   # filtered head position of the main person (cm)
@@ -207,27 +249,29 @@ class Tracker(threading.Thread):
 
     def on_people(self, camera, captured, people):
         number, rotation, origin = self.poses[camera.device_id]
-        w, h = camera.lens["size"]
-        heads = []
+        lens = self.lenses[camera.device_id]
+        w, h = lens["size"]
+        found, pixels = [], []
         for box, points, _ in people:
-            good = points[:, 2] >= MIN_POINT_CONFIDENCE
-            if good[pose.LEFT_EYE] and good[pose.RIGHT_EYE]:
-                chosen, kind = [pose.LEFT_EYE, pose.RIGHT_EYE], "eyes"
-            else:
-                chosen, kind = [i for i in FACE if good[i]], "face"
-                if not chosen:
-                    continue
-            heads.append((points[chosen, :2].mean(0), kind, box))
-        lines = []
-        if heads:
-            normalized = calibration.normalize([head for head, _, _ in heads], camera.lens)
-            for (head, kind, box), (x, y) in zip(heads, normalized):
-                direction = rotation @ np.array([x, y, 1.0])
-                lines.append({"camera": number, "origin": origin, "direction": direction / np.linalg.norm(direction),
-                              "kind": kind, "box": (box[0] / w, box[1] / h, box[2] / w, box[3] / h),
-                              "head": (head[0] / w, head[1] / h), "number": None})
+            good = [i for i in FACE if points[i, 2] >= MIN_POINT_CONFIDENCE]
+            if good:
+                head = points[good, :2].mean(0)
+                found.append((box, points, good, head))
+                pixels += [points[i, :2] for i in good] + [head]
+        seen = []
+        if found:
+            directions = np.column_stack([calibration.normalize(pixels, lens), np.ones(len(pixels))]) @ rotation.T
+            directions = iter(directions / np.linalg.norm(directions, axis=1, keepdims=True))
+            for box, points, good, head in found:
+                face = {i: {"origin": origin, "direction": next(directions), "weight": float(points[i, 2]), "captured": captured}
+                        for i in good}
+                seen.append({"camera": number, "captured": captured, "face": face,
+                             "line": {"origin": origin, "direction": next(directions), "weight": 1.0, "captured": captured},
+                             "box": (box[0] / w, box[1] / h, box[2] / w, box[3] / h), "head": (head[0] / w, head[1] / h),
+                             "number": None})
         with self.wake:
-            self.views[camera.device_id] = (captured, lines)
+            self.views[camera.device_id] = (captured, seen)
+            self.version += 1
             self.wake.notify()
 
     # ---------- for the window ----------
@@ -235,10 +279,10 @@ class Tracker(threading.Thread):
     def seen_by(self, device_id):
         """[(box, head, person number or None)] in that camera's newest picture (fractions of the picture)."""
         with self.wake:
-            captured, lines = self.views.get(device_id, (0.0, []))
-        if time.monotonic() - captured > 0.5:
+            captured, seen = self.views.get(device_id, (0.0, []))
+        if time.perf_counter() - captured > 0.5:
             return []
-        return [(line["box"], line["head"], line["number"]) for line in lines]
+        return [(person["box"], person["head"], person["number"]) for person in seen]
 
     def select(self, device_id, x, y):
         """Make the person under (x, y) in that camera's picture the main person; their number or None."""
@@ -247,7 +291,7 @@ class Tracker(threading.Thread):
         if not hits:
             return None
         _, number = min(hits, key=lambda hit: (hit[0][2] - hit[0][0]) * (hit[0][3] - hit[0][1]))
-        self.main, self.chosen, self.main_seen = number, True, time.monotonic()
+        self.main, self.chosen, self.main_seen = number, True, time.perf_counter()
         return number
 
     def automatic(self):
@@ -277,134 +321,199 @@ class Tracker(threading.Thread):
             camera.worker.pose(model.device)
         self.status = f"pose model on the {model.device} ({model.ms:.0f} ms per picture), {len(self.cameras)} cameras"
         del model
-        s = self.settings
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        address = (s["unreal_address"], int(s["moverse_port"]))
-        smooth = OneEuro(s["filter_min_cutoff"], s["filter_beta"])
+        address = (self.settings["unreal_address"], int(self.settings["moverse_port"]))
         offset, subject = head_offset(), subject_packet()
-        last_update = last_seen = last_subject = last_time = 0.0
-        last_main, times = None, []
+        last_update = last_subject = 0.0
         while self.running:
             with self.wake:
                 self.wake.wait(0.1)
-            wait = MIN_INTERVAL - (time.monotonic() - last_update)
+            wait = MIN_INTERVAL - (time.perf_counter() - last_update)
             if wait > 0:
                 time.sleep(wait)
-            now = last_update = time.monotonic()
-            with self.wake:
-                views = {k: v for k, v in self.views.items() if now - v[0] <= MAX_AGE}
-            if not views:
+            now = last_update = time.perf_counter()
+            if not self.update(now):
                 continue
-            newest = max(captured for captured, _ in views.values())
-            located = self.locate([line for _, lines in views.values() for line in lines], now)
-            main = self.choose_main(now)
-            if main is None or main not in located:
-                if now - last_seen > LOST_AFTER:
-                    self.position = None
-                    smooth.t = None  # start fresh when someone comes back
-                continue
-            if newest <= last_time:
-                continue  # nothing new since the last update
-            if main != last_main:
-                smooth.t = None  # another person: no gliding from the old one's position
-                last_main = main
-            last_seen, last_time = now, newest
-            head = smooth(located[main], newest)
-            self.position = head
-            times = [t for t in times if now - t < 1.0] + [now]
-            self.rate = len(times)
             try:
                 if now - last_subject > 1.0:  # sent every second, so Unreal can start at any time
                     sock.sendto(subject, address)
                     last_subject = now
-                sock.sendto(frame_packet(head, offset), address)
+                sock.sendto(frame_packet(self.position, offset), address)
+                if self.sent == 0:
+                    self.log(f"tracking: first packet sent to {address[0]}:{address[1]}")
                 self.sent += 1
             except OSError as error:
                 self.log(f"tracking: send failed: {error}")
                 time.sleep(0.5)
 
-    def locate(self, lines, now):
-        """Gives each line of sight the number of its person; {number: head position} of the people seen by
-        two or more cameras now."""
-        taken, members = set(), collections.defaultdict(list)
-        # People seen before: from each camera, the line passing nearest to their last position.
-        pairs = sorted((distance_to_line(track["position"], line), number, i)
-                       for number, track in self.tracks.items() for i, line in enumerate(lines))
-        slots = set()
-        for gap, number, i in pairs:
-            if gap > TRACK_GATE:
+    def update(self, now):
+        """One combining step (now: the time on time.perf_counter()); True when the main person's smoothed
+        head position (self.position) changed and should be sent."""
+        with self.wake:
+            if self.version == self.used:
+                return False
+            self.used = self.version
+            views = list(self.views.values())
+        newest = max(captured for captured, _ in views)
+        seen = [person for captured, people in views if newest - captured <= SAME_TIME for person in people]
+        updated = self.locate(seen, newest, now)
+        main = self.choose_main(now)
+        if main is None or main not in updated:
+            if now - self.last_seen > LOST_AFTER:
+                self.position = None
+                self.smooth.t = None  # start fresh when someone comes back
+            return False
+        if newest <= self.last_time:
+            return False
+        if main != self.last_main:
+            self.smooth.t = None  # another person: no gliding from the old one's position
+            self.last_main = main
+        self.last_seen, self.last_time = now, newest
+        self.position = self.smooth(self.tracks[main]["position"], newest)
+        self.times = [t for t in self.times if now - t < 1.0] + [now]
+        self.rate = len(self.times)
+        return True
+
+    def locate(self, seen, t, now):
+        """Numbers the people seen in the pictures and moves the known people; returns the numbers of the
+        confirmed people located now (seen by two or more cameras). t: time of the newest picture."""
+        expected = {n: track["position"] + track["velocity"] * min(max(t - track["time"], 0.0), 0.2)
+                    for n, track in self.tracks.items()}
+        pairs = sorted((distance_to_line(expected[n], person["line"]), n, i)
+                       for n in self.tracks for i, person in enumerate(seen))
+        taken, slots, members = set(), set(), collections.defaultdict(list)
+        for gap, n, i in pairs:
+            if gap > MATCH:
                 break
-            if i in taken or (number, lines[i]["camera"]) in slots:
+            if i in taken or (n, seen[i]["camera"]) in slots:
                 continue
             taken.add(i)
-            slots.add((number, lines[i]["camera"]))
-            members[number].append(i)
-        located = {}
-        for number, chosen in members.items():
-            point = self.triangulate([lines[i] for i in chosen])
-            for i in chosen:
-                lines[i]["number"] = number
-            if point is not None:
-                located[number] = point
-        # New people: two cameras' lines that nearly cross at a head height, joined by others passing close.
-        rest = [i for i in range(len(lines)) if i not in taken]
+            slots.add((n, seen[i]["camera"]))
+            members[n].append(i)
+        updated = set()
+        for n, chosen in members.items():
+            found = self.head(self.tracks[n], [seen[i] for i in chosen], t)
+            if found is not None and self.move(n, *found, t, now, {seen[i]["camera"] for i in chosen}):
+                updated.add(n)
+        # New people: two cameras' head lines that nearly cross at a head height, joined by others passing close;
+        # not where a known person is (those are their own lines that did not match this time).
+        rest = [i for i in range(len(seen)) if i not in taken]
         candidates = []
         for a, b in itertools.combinations(rest, 2):
-            if lines[a]["camera"] == lines[b]["camera"]:
-                continue
-            met = crossing(lines[a], lines[b])
-            if met and met[1] < GATE and HEAD_HEIGHT[0] <= met[0][2] <= HEAD_HEIGHT[1]:
-                candidates.append((met[1], a, b, met[0]))
+            if seen[a]["camera"] != seen[b]["camera"]:
+                met = crossing(seen[a]["line"], seen[b]["line"])
+                if met and met[1] < NEW_GATE and HEAD_HEIGHT[0] <= met[0][2] <= HEAD_HEIGHT[1]:
+                    candidates.append((met[1], a, b, met[0]))
         for _, a, b, guess in sorted(candidates, key=lambda c: c[0]):
             if a in taken or b in taken:
                 continue
-            chosen, cameras = [a, b], {lines[a]["camera"], lines[b]["camera"]}
-            for i in sorted(rest, key=lambda i: distance_to_line(guess, lines[i])):
-                if i not in taken and i not in chosen and lines[i]["camera"] not in cameras and distance_to_line(guess, lines[i]) < GATE:
-                    chosen.append(i)
-                    cameras.add(lines[i]["camera"])
-            point = self.triangulate([lines[i] for i in chosen])
-            if point is None:
+            if any(np.linalg.norm(guess - p) < MERGE for p in expected.values()) or not self.inside(guess):
+                taken.update((a, b))
                 continue
-            number = self.next_number
+            chosen, cameras = [a, b], {seen[a]["camera"], seen[b]["camera"]}
+            for i in sorted(rest, key=lambda i: distance_to_line(guess, seen[i]["line"])):
+                if i not in taken and i not in chosen and seen[i]["camera"] not in cameras \
+                        and distance_to_line(guess, seen[i]["line"]) < NEW_GATE:
+                    chosen.append(i)
+                    cameras.add(seen[i]["camera"])
+            track = {"position": guess, "velocity": np.zeros(3), "time": 0.0, "seen": now, "cameras": [],
+                     "offsets": {}, "path": collections.deque(), "hits": 0, "most": 0, "held": 0, "confirmed": False}
+            found = self.head(track, [seen[i] for i in chosen], t)
+            if found is None:
+                continue
+            n = self.next_number
             self.next_number += 1
-            self.tracks[number] = {"position": point, "seen": now, "cameras": []}
-            located[number] = point
+            self.tracks[n] = track
+            members[n] = chosen
             taken.update(chosen)
-            members[number] = chosen
+            self.move(n, *found, t, now, cameras)
+            updated.add(n)
+        for n, chosen in members.items():
+            confirmed = n in self.tracks and self.tracks[n]["confirmed"]
             for i in chosen:
-                lines[i]["number"] = number
-        for number, point in located.items():
-            self.tracks[number].update(position=point, seen=now,
-                                       cameras=sorted(lines[i]["camera"] for i in members[number]))
-        self.tracks = {n: t for n, t in self.tracks.items() if now - t["seen"] <= FORGET_AFTER}
-        self.people = [{"number": n, "position": t["position"], "cameras": t["cameras"]}
-                       for n, t in self.tracks.items() if now - t["seen"] <= LOST_AFTER]
-        return located
+                seen[i]["number"] = n if confirmed else None
+        # Forget people unseen too long (not confirmed ones quickly); two confirmed people on the same spot are one.
+        self.tracks = {n: track for n, track in self.tracks.items()
+                       if now - track["seen"] <= (FORGET_AFTER if track["confirmed"] else 0.3)}
+        confirmed = sorted(n for n, track in self.tracks.items() if track["confirmed"])
+        for a, b in itertools.combinations(confirmed, 2):
+            if a in self.tracks and b in self.tracks and \
+                    np.linalg.norm(self.tracks[a]["position"] - self.tracks[b]["position"]) < MERGE / 2:
+                del self.tracks[a if b == self.main else b]
+        self.people = [{"number": n, "position": track["position"], "cameras": track["cameras"]}
+                       for n, track in self.tracks.items() if track["confirmed"] and now - track["seen"] <= LOST_AFTER]
+        return {n for n in updated if n in self.tracks and self.tracks[n]["confirmed"]}
 
     @staticmethod
-    def triangulate(lines):
-        """Head position from the lines of sight of one person, or None (fewer than two usable lines)."""
-        eyes = [line for line in lines if line["kind"] == "eyes"]
-        lines = eyes if len(eyes) >= 2 else lines
-        if len(lines) < 2:
-            return None
-        point = closest_point(lines)
-        if point is None:
-            return None
-        near = [line for line in lines if distance_to_line(point, line) < GATE]
-        if len(near) < 2:
-            return None
-        if len(near) < len(lines):  # a line that does not belong (wrong match): without it
-            point = closest_point(near)
-        if point is None or not HEAD_HEIGHT[0] <= point[2] <= HEAD_HEIGHT[1]:
-            return None
-        return point
+    def head(track, people, t):
+        """(head position, whether from both eyes) of one person from the lines of sight of their face points,
+        or None."""
+        points = {}
+        for k in FACE:
+            lines = []
+            for person in people:
+                line = person["face"].get(k)
+                if line is not None:  # moved along the person's velocity to the moment t
+                    lines.append(dict(line, origin=line["origin"] + track["velocity"] * (t - line["captured"])))
+            if len(lines) >= 2:
+                point = robust_point(lines)
+                if point is not None:
+                    points[k] = point
+        named = {"left eye": points.get(pose.LEFT_EYE), "right eye": points.get(pose.RIGHT_EYE),
+                 "nose": points.get(pose.NOSE), "left ear": points.get(pose.LEFT_EAR), "right ear": points.get(pose.RIGHT_EAR)}
+        offsets = track["offsets"]
+        eyes = named["left eye"] is not None and named["right eye"] is not None
+        if eyes:
+            head = (named["left eye"] + named["right eye"]) / 2
+            for name, point in named.items():  # how far each point is from the middle of the eyes, for later
+                if point is not None:
+                    offsets[name] = head - point if name not in offsets else \
+                        (1 - OFFSET_SMOOTHING) * offsets[name] + OFFSET_SMOOTHING * (head - point)
+        else:
+            guesses = [point + offsets[name] for name, point in named.items() if point is not None and name in offsets]
+            if guesses:
+                head = np.mean(guesses, axis=0)
+            elif points:
+                head = np.mean(list(points.values()), axis=0)  # nothing learned yet
+            else:
+                return None
+        return (head, eyes) if HEAD_HEIGHT[0] <= head[2] <= HEAD_HEIGHT[1] else None
+
+    def inside(self, point):
+        return self.area is None or \
+            cv2.pointPolygonTest(self.area, (float(point[0]), float(point[1])), True) >= -AREA_MARGIN
+
+    def move(self, n, head, eyes, t, now, cameras):
+        """Moves person n to the measured head; False when the measurement was held back as a jump."""
+        track = self.tracks[n]
+        if track["time"]:
+            dt = max(t - track["time"], 0.0)
+            expected = track["position"] + track["velocity"] * min(dt, 0.2)
+            if np.linalg.norm(head - expected) > JUMP_SLACK + MAX_SPEED * dt and track["held"] < HOLD_BACK:
+                track["held"] += 1
+                return False
+            if not eyes:  # stand-in points only: less sure, so only part of the way
+                head = expected + FALLBACK_SHARE * (head - expected)
+        track["held"] = 0
+        path = track["path"]  # positions of the last 0.15 s: velocity over that span (less noisy than per update)
+        path.append((t, head))
+        while path and t - path[0][0] > 0.15:
+            path.popleft()
+        if len(path) >= 2 and path[-1][0] - path[0][0] >= 0.05:
+            velocity = (path[-1][1] - path[0][1]) / (path[-1][0] - path[0][0])
+            speed = float(np.linalg.norm(velocity))
+            track["velocity"] = velocity * min(1.0, 300.0 / speed) if speed > 0 else velocity
+        track.update(position=head, time=t, seen=now, cameras=sorted(cameras))
+        track["hits"] += 1
+        track["most"] = max(track["most"], len(cameras))
+        if track["hits"] >= CONFIRM and track["most"] >= NEW_CAMERAS:
+            track["confirmed"] = True
+        return True
 
     def choose_main(self, now):
         """The main person's number if visible; else wait for the clicked one (up to KEEP_CHOSEN), else the
         person nearest to the wall."""
-        visible = {n: t for n, t in self.tracks.items() if now - t["seen"] <= LOST_AFTER}
+        visible = {p["number"]: p for p in self.people}
         if self.main in visible:
             self.main_seen = now
             return self.main

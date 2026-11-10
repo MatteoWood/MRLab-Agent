@@ -196,7 +196,7 @@ class Space(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
 
-        now = time.monotonic()
+        now = time.perf_counter()
         seen = set()
         people = sorted(self.people(), key=lambda p: p[1])  # the main person drawn last, on top
         for number, main, position in people:

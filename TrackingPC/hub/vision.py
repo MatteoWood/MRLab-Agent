@@ -157,7 +157,7 @@ class FrameStore:
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.latest = None  # (BGR image, capture time on time.monotonic())
+        self.latest = None  # (BGR image, capture time on time.perf_counter())
         self.history = collections.deque(maxlen=SEQUENCE_STEPS)
 
     def publish(self, image, captured):
@@ -204,7 +204,7 @@ class Describer(threading.Thread):
             if not changed and (main[0] if main else None) == described_main:
                 time.sleep(CHECK_INTERVAL)
                 continue
-            start = time.monotonic()
+            start = time.perf_counter()
             try:
                 text = describe(self.model, frames, main[1:] if main else None)
             except (OSError, RuntimeError, ValueError) as error:  # Ollama down or busy: say so and try again
@@ -213,7 +213,7 @@ class Describer(threading.Thread):
                 time.sleep(2)
                 continue
             self.error = ""
-            model_ms = round((time.monotonic() - start) * 1000)
+            model_ms = round((time.perf_counter() - start) * 1000)
             if self.view and text == self.view["description"]:
                 continue  # keep comparing with the last described picture, so a slow change is still checked
             described, described_main = small, (main[0] if main else None)
@@ -236,7 +236,7 @@ class Sender(threading.Thread):
         while self.running:
             view, frames = self.describer.view, self.store.frames()
             if view and frames:
-                now = time.monotonic()
+                now = time.perf_counter()
                 packet = json.dumps({
                     "seq": view["seq"],
                     "description": view["description"],

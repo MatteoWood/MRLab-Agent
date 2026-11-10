@@ -28,7 +28,7 @@ def grab_webcam(store):
     while True:
         ok, image = cap.read()
         if ok:
-            store.publish(image, time.monotonic())
+            store.publish(image, time.perf_counter())
 
 
 def grab_oak(store, device_id):
@@ -41,7 +41,7 @@ def grab_oak(store, device_id):
         while pipeline.isRunning():
             frame = queue.get()
             age = (dai.Clock.now() - frame.getTimestamp()).total_seconds()
-            store.publish(frame.getCvFrame(), time.monotonic() - age)
+            store.publish(frame.getCvFrame(), time.perf_counter() - age)
 
 
 def log(text):

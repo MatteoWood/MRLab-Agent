@@ -83,11 +83,11 @@ def camera_process(info, conn, stop):
     try:
         import depthai as dai
 
-        start = time.monotonic()
+        start = time.perf_counter()
         device = open_device(dai, info, conn, stop)
         if device is None:
             return
-        opened = time.monotonic()
+        opened = time.perf_counter()
         with dai.Pipeline(device) as pipeline:
             socket = dai.CameraBoardSocket.CAM_A
             sensor = next(f for f in device.getConnectedCameraFeatures() if f.socket == socket)
@@ -105,7 +105,7 @@ def camera_process(info, conn, stop):
                 "fisheye": calibration.getDistortionModel(socket).name == "Fisheye",
             }))
             pipeline.start()
-            started = time.monotonic()
+            started = time.perf_counter()
             model, first = None, True
             while not stop.is_set() and pipeline.isRunning():
                 while conn.poll():
@@ -117,11 +117,13 @@ def camera_process(info, conn, stop):
                     continue
                 while (newer := queue.tryGet()) is not None:  # the newest picture: no delay piling up when the
                     frame = newer                             # pose model is slower than the camera
-                captured = time.monotonic() - (dai.Clock.now() - frame.getTimestamp()).total_seconds()
+                # All picture times in the hub are on time.perf_counter(): time.monotonic() ticks only every
+                # 15.6 ms on Windows with Python 3.11, too coarse to match pictures of different cameras.
+                captured = time.perf_counter() - (dai.Clock.now() - frame.getTimestamp()).total_seconds()
                 jpeg = frame.getData().tobytes()
                 if first:
                     conn.send(("log", f"opened in {opened - start:.1f} s, pipeline started in {started - opened:.1f} s, "
-                                      f"first picture after {time.monotonic() - start:.1f} s ({size[0]}x{size[1]}, "
+                                      f"first picture after {time.perf_counter() - start:.1f} s ({size[0]}x{size[1]}, "
                                       f"{device.getProductName()}, {sensor.sensorName})"))
                     first = False
                 people, pose_ms = None, None
@@ -149,12 +151,12 @@ def open_device(dai, info, conn, stop):
                                 dai.XLinkError_t.X_LINK_SUCCESS)
     except (KeyError, AttributeError, TypeError):
         target = dai.DeviceInfo(name)
-    deadline = time.monotonic() + REOPEN_WAIT
+    deadline = time.perf_counter() + REOPEN_WAIT
     while not stop.is_set():
         try:
             return dai.Device(target)
         except RuntimeError as error:
-            if time.monotonic() > deadline:
+            if time.perf_counter() > deadline:
                 raise
             conn.send(("status", "camera restarting, retrying"))
             conn.send(("log", f"not ready ({error}), retrying"))
@@ -222,7 +224,7 @@ class CameraWorker(threading.Thread):
                 kind = message[0]
                 if kind == "picture":
                     _, captured, jpeg, people, pose_ms = message
-                    now = time.monotonic()
+                    now = time.perf_counter()
                     cam.latest = (jpeg, captured)
                     cam.history.append((captured, jpeg))
                     cam.pose_ms = pose_ms
@@ -253,8 +255,8 @@ class CameraWorker(threading.Thread):
             cam.status = f"error: {error}"
         finally:
             self.stop_event.set()
-            deadline = time.monotonic() + 5.0
-            while self.process.is_alive() and time.monotonic() < deadline:
+            deadline = time.perf_counter() + 5.0
+            while self.process.is_alive() and time.perf_counter() < deadline:
                 try:  # keep reading, or the helper waits forever to hand over its last picture
                     if self.conn.poll(0.05):
                         self.conn.recv()
@@ -292,7 +294,7 @@ class WebcamWorker(threading.Thread):
                 if not ok:
                     time.sleep(0.05)
                     continue
-                now = time.monotonic()
+                now = time.perf_counter()
                 h, w = image.shape[:2]
                 if cam.lens is None:
                     f = (w / 2) / math.tan(math.radians(35.0))  # assumed 70 degrees across

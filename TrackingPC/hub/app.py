@@ -352,9 +352,9 @@ class Hub(QMainWindow):
 
         walk, walk_box = card("1. Walk with the board")
         walk_box.addWidget(label(
-            "Hold the board by its edges (the pattern fully visible), high (about 2 m) and within 2 to 3 m of two "
-            "neighbouring cameras, facing both; further away its squares are too small in these wide pictures. "
-            "Move slowly from pair to pair around the whole space, about 3 minutes. Green frame: that camera finds "
+            "Hold the board by its edges (the pattern fully visible), high (about 2 m), facing two or three "
+            "neighbouring cameras at once, and tilt it now and then (tilted views measure each camera's lens). "
+            "Move slowly from group to group around the whole space, about 3 minutes. Green frame: that camera finds "
             "the board now. Each camera needs 20 or more views; a view counts when another camera finds the board "
             "at the same moment.", "small", wrap=True))
         self.walk_button = QPushButton("Start")
@@ -839,7 +839,7 @@ class Hub(QMainWindow):
         used = self.settings.get("calibration")
         in_use = f"In use: score {used['score']}, made {used['made']}." if used else "In use: none (tracking needs one)."
         if self.computing:
-            text = "Computing (up to a minute)..."
+            text = "Computing (up to two minutes)..."
         elif self.result and "error" in self.result:
             text = f"Did not work: {self.result['error']}"
         elif self.result:
@@ -851,7 +851,7 @@ class Hub(QMainWindow):
             self.result_text.setPlainText(text)
         if self.pages.currentIndex() != PAGES.index("Calibration"):
             return
-        now = time.monotonic()
+        now = time.perf_counter()
         for i, view in enumerate(self.board_views):
             camera = self.cameras[i] if i < len(self.cameras) else None
             if camera is None or camera.preview is None or camera.status != "streaming":

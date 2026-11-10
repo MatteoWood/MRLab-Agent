@@ -1,17 +1,18 @@
 """Calibration of the cameras with the checkerboard (hub page "Calibration").
 
 Finds where each camera is and where it points, in tracking space as NDC_Basic uses it (cm; X towards the
-wall, Y to the right seen facing the wall, Z up). The lens of each camera (focal length, distortion)
-comes from the camera itself (factory calibration); only positions and directions are found here.
+wall, Y to the right seen facing the wall, Z up), and each camera's focal length and picture centre; the
+lens distortion comes from the camera itself (factory calibration).
 
 1. Walk: someone walks through the space holding the board (BOARD inner corners, SQUARE cm squares) and
-   turns it towards different cameras. Every SHOT_INTERVAL the hub takes the pictures the cameras took at
-   the same moment (within SAME_MOMENT) and finds the board's corners in them. A moment where two or more
+   turns it towards different cameras. Every SHOT_INTERVAL the hub finds the board's corners in each
+   camera's pictures around one moment, interpolated to that moment (board_at). A moment where two or more
    cameras see the board tells how those cameras sit relative to each other.
 2. Floor: the board lies flat on the floor, face up, its long side parallel to the wall and centred on
    the wall's middle; the distance from the bottom of the wall to the near edge of the black and white
    pattern is measured. This ties the cameras to the wall.
-3. Solve: first guesses from the moments two cameras share (from the camera with the most shared moments
+3. Solve: each camera's focal length and picture centre from its own views (measure_lens); then first
+   guesses from the moments two cameras share (from the camera with the most shared moments
    outwards), then all camera positions and board positions are refined together so the board corners land
    where the cameras saw them (in turns: each board with the cameras fixed, each camera with the boards
    fixed). Views that fit badly are dropped.
@@ -36,11 +37,14 @@ WALL_X, WALL_Y = 309.0, 16.0  # middle of the LED wall at the floor, tracking sp
 CAMERA_HEIGHT = 305.0          # all cameras are at ceiling height (owner, 2026-11-10)
 FRONT_CAMERAS = (1, 2, 6)      # cameras at the wall: they tell on which side of the floor board the wall is
 SHOT_INTERVAL = 0.25           # s between moments taken
-SAME_MOMENT = 0.012            # s: a camera's picture counts for a moment if taken this close to it
+SAME_MOMENT = 0.002            # s: a picture this close to a moment is used as it is, else two are interpolated
+MAX_GAP = 0.04                 # s: the two pictures around a moment at most this far apart (one dropped picture)
+MAX_STEP = 25.0                # px: the board moved more than this between them: too fast, not used
 MIN_SHARED = 3                 # moments two cameras must share to be linked
 GOOD_VIEWS = 20                # views a camera needs for full marks
 MAX_VIEW_ERROR = 3.0           # px: views that fit worse (or worse than 3 x the median) are dropped
 FLOOR_SECONDS = 2.0
+MIN_LENS_VIEWS = 30            # views a camera needs to measure its own focal length and picture centre
 
 
 # ---------- lens and board ----------
@@ -59,6 +63,47 @@ def normalize(points, lens):
     else:
         out = cv2.undistortPoints(points, matrix, None)
     return out.reshape(-1, 2)
+
+
+def measure_lens(views, lens, most=40):
+    """(lens, text): the camera's focal length and picture centre measured from its own board views (pixels),
+    the lens distortion kept as the camera reports it (distortion is set in normalized coordinates, so it
+    stays right when the picture is a scaled or cropped version of what the factory calibrated). In the lab
+    the cameras' own lens data made the space about 4 % too large (2026-11-10). The camera's values are kept
+    with fewer than MIN_LENS_VIEWS views or when the measured focal length is more than 15 % off. Uses `most`
+    views spread over the walk: 40 views took 2 s and gave the focal length within 0.1 % in a simulation,
+    100 took 77 s for no better result."""
+    old = np.array(lens["matrix"], float)
+    if len(views) < MIN_LENS_VIEWS:
+        return lens, "lens as the camera reports it (too few views to measure it)"
+    views = views[::max(1, len(views) // most)][:most]
+    objects = [BOARD_POINTS.astype(np.float32).reshape(-1, 1, 3) for _ in views]
+    images = [np.asarray(v, np.float32).reshape(-1, 1, 2) for v in views]
+    size = tuple(int(s) for s in lens["size"])
+    distortion = np.array(lens["distortion"], float)
+    criteria = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, 1e-9)
+    try:
+        if lens["fisheye"]:
+            f = cv2.fisheye
+            flags = (f.CALIB_USE_INTRINSIC_GUESS | f.CALIB_RECOMPUTE_EXTRINSIC | f.CALIB_FIX_SKEW
+                     | f.CALIB_FIX_K1 | f.CALIB_FIX_K2 | f.CALIB_FIX_K3 | f.CALIB_FIX_K4)
+            _, new, _, _, _ = f.calibrate(objects, images, size, old.copy(), distortion[:4].reshape(4, 1).copy(),
+                                          flags=flags, criteria=criteria)
+        else:
+            full = np.zeros(14)
+            full[:min(14, distortion.size)] = distortion[:14]
+            flags = (cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_ASPECT_RATIO | cv2.CALIB_FIX_TANGENT_DIST
+                     | cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3 | cv2.CALIB_FIX_K4 | cv2.CALIB_FIX_K5
+                     | cv2.CALIB_FIX_K6 | cv2.CALIB_RATIONAL_MODEL | cv2.CALIB_THIN_PRISM_MODEL
+                     | cv2.CALIB_FIX_S1_S2_S3_S4 | cv2.CALIB_TILTED_MODEL | cv2.CALIB_FIX_TAUX_TAUY)
+            _, new, _, _, _ = cv2.calibrateCamera(objects, images, size, old.copy(), full, flags=flags, criteria=criteria)
+    except cv2.error as error:
+        return lens, f"lens as the camera reports it (measuring failed: {error.msg})"
+    change = new[0, 0] / old[0, 0] - 1
+    if abs(change) > 0.15:
+        return lens, f"lens as the camera reports it (measured focal length {change * 100:+.0f} %, not plausible)"
+    measured = dict(lens, matrix=new.tolist())
+    return measured, f"focal length {new[0, 0]:.1f} px (camera: {old[0, 0]:.1f}, {change * 100:+.1f} %)"
 
 
 def find_board(gray):
@@ -162,6 +207,32 @@ def medoid(poses):
 
 # ---------- collecting ----------
 
+def board_at(history, moment):
+    """The board's corners at the moment, from one camera's pictures [(capture time, jpeg)], or None.
+
+    The cameras do not take their pictures at the same instant (at 60 fps up to 8 ms apart from any moment)
+    and the board moves: in the lab, pictures up to 12 ms apart gave about 1 px of error. So the corners are
+    interpolated between the camera's pictures just before and just after the moment; a picture within
+    SAME_MOMENT of it is used as it is. The second picture is searched only when the first shows the board."""
+    before = max((h for h in history if h[0] <= moment), key=lambda h: h[0], default=None)
+    after = min((h for h in history if h[0] > moment), key=lambda h: h[0], default=None)
+    near = sorted((h for h in (before, after) if h is not None), key=lambda h: abs(h[0] - moment))
+    if not near:
+        return None
+    first = find_board(cv2.imdecode(np.frombuffer(near[0][1], np.uint8), cv2.IMREAD_GRAYSCALE))
+    if first is None or abs(near[0][0] - moment) <= SAME_MOMENT:
+        return first
+    if len(near) < 2 or after[0] - before[0] > MAX_GAP:
+        return None
+    second = find_board(cv2.imdecode(np.frombuffer(near[1][1], np.uint8), cv2.IMREAD_GRAYSCALE))
+    if second is None:
+        return None
+    early, late = (first, second) if near[0] is before else (second, first)
+    if np.mean(np.linalg.norm(late - early, axis=1)) > MAX_STEP:
+        return None  # moved too fast to trust
+    return early + (late - early) * (moment - before[0]) / (after[0] - before[0])
+
+
 class Collector(threading.Thread):
     """Takes the pictures the cameras took at the same moments and finds the board in them.
 
@@ -180,29 +251,22 @@ class Collector(threading.Thread):
 
     def run(self):
         pool = ThreadPoolExecutor(max(1, len(self.cameras)))
-        end = time.monotonic() + FLOOR_SECONDS
-        while self.running and (self.mode == "walk" or time.monotonic() < end):
-            started = time.monotonic()
-            moment = started - 0.05  # a little in the past, so every camera has a picture of it
-            pictures = {}
-            for number, camera in self.cameras:
-                history = list(camera.history)
-                if history:
-                    captured, jpeg = min(history, key=lambda h: abs(h[0] - moment))
-                    if abs(captured - moment) <= SAME_MOMENT:
-                        pictures[number] = jpeg
-            found = pool.map(lambda jpeg: find_board(cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_GRAYSCALE)),
-                             pictures.values())
-            shot = {number: corners for number, corners in zip(pictures, found) if corners is not None}
+        end = time.perf_counter() + FLOOR_SECONDS
+        while self.running and (self.mode == "walk" or time.perf_counter() < end):
+            started = time.perf_counter()
+            moment = started - 0.05  # a little in the past, so every camera has pictures before and after it
+            numbers = [number for number, _ in self.cameras]
+            found = pool.map(lambda camera: board_at(list(camera.history), moment), [c for _, c in self.cameras])
+            shot = {number: corners for number, corners in zip(numbers, found) if corners is not None}
             self.checked += 1
             for number in shot:
-                self.seen[number] = time.monotonic()
+                self.seen[number] = time.perf_counter()
             if len(shot) >= (2 if self.mode == "walk" else 1):
                 self.shots.append(shot)
                 for number in shot:
                     self.views[number] += 1
                     self.partners[number] |= set(shot) - {number}
-            time.sleep(max(0.0, SHOT_INTERVAL - (time.monotonic() - started)))
+            time.sleep(max(0.0, SHOT_INTERVAL - (time.perf_counter() - started)))
         pool.shutdown(wait=False)
         self.running = False
 
@@ -216,10 +280,13 @@ def solve(walk, floor, cameras, distance):
     distance: cm from the bottom of the wall to the near edge of the board's pattern (floor shots).
     Returns {"cameras": {device id: {"number", "rotation" (camera to tracking, 3 x 3), "position" (cm),
     "error_px", "views", "score"}}, "score", "report" (lines of text)} or raises ValueError."""
-    focal = {n: float(lens["matrix"][0][0]) for n, (_, lens) in cameras.items()}
-    walk = [{n: normalize(c, cameras[n][1]) for n, c in shot.items() if n in cameras} for shot in walk]
+    lenses, lens_notes = {}, {}
+    for n, (_, lens) in cameras.items():
+        lenses[n], lens_notes[n] = measure_lens([shot[n] for shot in walk if n in shot], lens)
+    focal = {n: float(lens["matrix"][0][0]) for n, lens in lenses.items()}
+    walk = [{n: normalize(c, lenses[n]) for n, c in shot.items() if n in cameras} for shot in walk]
     walk = [shot for shot in walk if len(shot) >= 2]
-    floor = [{n: normalize(c, cameras[n][1]) for n, c in shot.items() if n in cameras} for shot in floor]
+    floor = [{n: normalize(c, lenses[n]) for n, c in shot.items() if n in cameras} for shot in floor]
     floor = [shot for shot in floor if shot]
     if not walk:
         raise ValueError("no moment where two cameras saw the board: walk with the board first")
@@ -331,9 +398,13 @@ def solve(walk, floor, cameras, distance):
         result[device_id] = {
             "number": n, "rotation": (to_tracking @ inverse(poses[n])[:3, :3]).tolist(),
             "position": position.tolist(), "error_px": round(error, 2), "views": count_views, "score": round(float(score)),
+            "matrix": [list(map(float, row)) for row in lenses[n]["matrix"]],  # the lens the tracker must use
         }
         report.append(f"Camera {n}: score {score:.0f}  |  {error:.2f} px  |  {count_views} views  |  at X {position[0]:.0f}, "
-                      f"Y {position[1]:.0f}, height {position[2]:.0f} cm (known {CAMERA_HEIGHT:.0f})")
+                      f"Y {position[1]:.0f}, height {position[2]:.0f} cm (known {CAMERA_HEIGHT:.0f})  |  {lens_notes[n]}")
+    if 2 in poses and 6 in poses:
+        gap = np.linalg.norm(centres[2] - centres[6]) / 100
+        report.append(f"Check with a tape: cameras 2 and 6 (top left and right of the wall) are {gap:.2f} m apart.")
     total = float(np.mean([result[cameras[n][0]]["score"] if cameras[n][0] in result else 0 for n in cameras]))
     report.insert(0, f"Score {total:.0f} of 100  |  {len(used)} moments with 2+ cameras  |  floor board seen by camera(s) "
                      + ", ".join(str(n) for n in floor_cameras))
