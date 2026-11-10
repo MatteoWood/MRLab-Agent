@@ -46,28 +46,39 @@ The hub numbers them in this order from their network addresses, listed as `came
    any free port, not the Moverse port). Start Play or nDisplay Launch.
 4. Double-click `MRLabHub.exe`.
    - **Cameras**: the hub searches at start (Search to repeat). Each tile shows ID, address and state
-     ("found", "in use by another program" = Moverse still running). Press **Connect**: the cameras open
-     one after another ("waiting", "connecting", then the picture), a few seconds each. On the camera on top of the wall press **Use as frontal** (blue frame).
+     ("found", "in use by another program" = Moverse still running). Press **Connect**: all cameras open at
+     the same time, each in its own helper program (about 10 s). Each sends its full picture (1280x800) at
+     60 fps, compressed to JPEG on the camera. Camera 1 is the frontal camera (blue frame): it gives Frank's
+     view. **Use as frontal** picks another one, without reconnecting. All cameras are used for tracking.
+   - **Calibration** (once, and again whenever a camera moves): where each camera is and where it points.
+     1. **Walk**: press Start. Hold the checkerboard by its edges (pattern fully visible), high (about 2 m),
+        within 2 to 3 m of two neighbouring cameras and facing both. Move slowly from pair to pair around
+        the whole space for about 3 minutes. A green frame shows which cameras find the board right now; each
+        camera needs 20 or more views (a view counts when another camera finds the board at the same moment).
+        Press Stop.
+     2. **Floor**: lay the board flat on the floor, face up, its long side parallel to the wall and its middle
+        in front of the middle of the wall. Measure from the bottom of the LED wall to the near edge of the
+        black and white pattern (not the white border), enter it, step away, press **Take the floor board**.
+        One camera finding it is enough. If none does, move it a little and measure again.
+     3. **Compute** (up to a minute), read the score and the line per camera (pixel error, views, position,
+        height against the known 305 cm), then **Use this calibration**. It is saved in `hub.local.json`.
+   - **Tracking**: the Unreal PC's address and the Moverse port come from `runtime\defaults.json` (the values
+     Moverse uses). Press **Start tracking**: the hub times the pose model (YOLO11 nano pose) on the graphics
+     card and the processor and starts the faster in every camera's helper; each tile then shows its ms per
+     picture. A head needs two cameras: the hub finds where their lines of sight to the eyes meet. Pick a
+     camera above the picture to see its view: each person has a number (P1, P2, ...), the same in every
+     camera. Only the main person (blue box, "MAIN") is sent; **click a person** to choose them. Without a
+     click it is the person nearest to the wall; if the clicked person is gone for 2 s, the nearest again.
+     X/Y/Z show the head position, Rate the updates per second, the line below which cameras see the main
+     person. `NDC_Basic` on the Unreal PC moves the view as with Moverse. Moverse must not run at the same time.
+     With tracking on, "What Frank sees" (Vision page) starts with "Main visitor" when Camera 1 sees them.
+   - **3D view**: the lab with the LED wall, the floor, the calibrated cameras (dot and a short line where they
+     look) and every tracked person live (own colour, the main person bigger, a fading trail, a line down to a
+     ring on the floor). Drag with the mouse to turn and tilt the view. Check: a person standing 2 m in front of
+     the middle of the wall should appear there, at their eye height.
    - **Vision**: enter the Unreal PC's address and the port from step 3, press **Start vision**. The first
      start in a new folder loads the model for a few minutes ("loading the model"). Then "What Frank sees"
      shows the description; the Unreal log shows "Camera service: first view from ...". Talk to Frank.
-   - **Tracking** (first version, never tested with an OAK): the Unreal PC's address and the Moverse
-     port are filled in from `runtime\defaults.json` (the values Moverse uses). Enter the frontal camera's
-     position and tilt in tracking space (measure them; the defaults are a guess). Press **Start
-     tracking**: the hub times the pose model (YOLO11 nano pose) on this PC's graphics card and processor
-     (about 5 s) and uses the faster; the info line shows which and how many ms per frame. The camera
-     only sends colour and depth. The followed person gets a box and a green dot between the eyes, X/Y/Z
-     show the head position ("distance from camera depth"), and `NDC_Basic` on the Unreal PC moves the
-     view as with Moverse. Moverse must not run at the same time.
-     Several people: each gets a number (P1, P2, ...). Only the main person (blue box, "MAIN") is sent.
-     **Click a person** in the picture to make them the main person. Without a click it is the nearest;
-     if the clicked person is gone for 2 s, the nearest again. **Automatic (nearest)** undoes the click.
-     With tracking on, "What Frank sees" (Vision page) starts with "Main visitor": that person first,
-     then the others as Person 2, 3, ...
-   - **3D view**: the lab with the LED wall and the floor, every tracked person live (own colour, the
-     main person bigger, a fading trail, a line down to a ring on the floor for the height). Drag with
-     the mouse to turn and tilt the view. Use it to check the camera position and tilt settings: a
-     person standing 2 m in front of the middle of the wall should appear there.
 5. Copy the **Log** (Vision page) to Claude when something does not work.
 6. Close the hub window (it also stops its Ollama). Start Moverse again if needed.
 
@@ -82,10 +93,11 @@ The hub numbers them in this order from their network addresses, listed as `came
 | File | What it does |
 |---|---|
 | `MRLabHub.exe` | Starts the hub (`launcher\MRLabHub.cs`, built by `launcher\build.bat` with the C# compiler that is part of Windows) |
-| `hub\app.py` | The window: Cameras, Tracking, Vision |
-| `hub\cameras.py` | Search, connect, stream (frontal camera: colour 960x540 at 30 fps and depth aligned to it; others: small preview); no model runs on the cameras |
+| `hub\app.py` | The window: Cameras, Calibration, Tracking, 3D view, Vision |
+| `hub\cameras.py` | Search, connect, stream: one helper program per camera (full picture as JPEG at 60 fps; the pose model runs in the helper, on this PC); no model runs on the cameras |
 | `hub\pose.py` | YOLO11 nano pose on this PC (ONNX Runtime; graphics card or processor, whichever is faster) |
-| `hub\tracking.py` | Head tracker: head point and its distance, tracking space, smoothing, Moverse packets |
+| `hub\calibration.py` | Camera positions from the checkerboard: board finder, collecting moments, solving, score |
+| `hub\tracking.py` | Head tracker: lines of sight from all calibrated cameras, people across cameras, smoothing, Moverse packets |
 | `hub\space.py`, `hub\led_wall.json` | The 3D view; the wall's panel edges in tracking space |
 | `tools\led_wall_from_fbx.py` | Makes `led_wall.json` from the lab's `LEDWall.fbx` (run again if the wall model changes) |
 | `hub\vision.py` | Description of the people with the local model, sent to Unreal |

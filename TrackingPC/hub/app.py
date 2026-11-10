@@ -1,8 +1,9 @@
 """MRLab Hub: the tracking PC program with a window (started by MRLabHub.exe).
 
-Pages: Cameras (search, connect, the 8 camera pictures, choose the frontal camera), Tracking (fast head
-tracker sending Moverse packets to Unreal, with its settings), Vision (the local vision model and Frank's
-view sent to Unreal). Settings are saved in hub.local.json next to MRLabHub.exe (not in Git).
+Pages: Cameras (search, connect, the 8 camera pictures, choose the frontal camera for Frank's view),
+Calibration (where the cameras are, with the checkerboard), Tracking (head position from all calibrated
+cameras, sent to Unreal as Moverse packets), 3D view, Vision (the local vision model and Frank's view sent
+to Unreal). Settings and the calibration are saved in hub.local.json next to MRLabHub.exe (not in Git).
 Run from the folder: runtime\\python\\pythonw.exe -m hub [--webcam]   (--webcam: laptop testing)
 """
 import collections
@@ -13,13 +14,14 @@ import threading
 import time
 
 import cv2
+import numpy as np
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton,
                                QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
-from hub import cameras, space, tracking, vision
+from hub import calibration, cameras, space, tracking, vision
 from hub.ollama import OllamaServer
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -29,11 +31,11 @@ SETTINGS = ROOT / "hub.local.json"
 LAB_DEFAULTS = ROOT / "runtime" / "defaults.json"
 DEFAULTS = {
     "unreal_address": "", "vision_port": 0, "moverse_port": 0, "frontal_id": "", "model": vision.DEFAULT_MODEL,
-    # Frontal camera pose in tracking space (cm, degrees): a first guess (top middle of the wall, tilted
-    # down); measure it in the lab.
-    "camera_x": 309.0, "camera_y": 16.0, "camera_z": 310.0, "camera_yaw": 0.0, "camera_pitch": 25.0, "camera_roll": 0.0,
     "filter_min_cutoff": 1.0, "filter_beta": 0.05,
+    "floor_distance": 50.0,  # cm from the bottom of the wall to the board's pattern, calibration step 2
+    "calibration": None,     # hub/calibration.py solve() result in use
 }
+PAGES = ["Cameras", "Calibration", "Tracking", "3D view", "Vision"]
 
 ACCENT, OK, WARN, BAD, MUTED = "#3B82F6", "#3FB950", "#D29922", "#F85149", "#5A6070"
 STYLE = """
@@ -187,9 +189,16 @@ class Tile(QFrame):
             return
         product = f"{camera.product}  |  " if camera.product else ""
         self.address.setText(f"{product}ID {camera.device_id}  |  {camera.address}")
-        text = camera.status + (f"  |  {camera.fps:.0f} fps" if camera.status == "streaming" else "")
+        text = camera.status
+        if camera.status == "streaming":
+            text += f"  |  {camera.fps:.0f} fps" + (f"  |  pose {camera.pose_ms:.0f} ms" if camera.pose_ms else "")
         self.status.setText(text)
-        color = {"streaming": OK, "found": ACCENT, "connecting": WARN}.get(camera.status, BAD if camera.status.startswith(("error", "in use")) else MUTED)
+        if camera.status in ("streaming", "found"):
+            color = OK if camera.status == "streaming" else ACCENT
+        elif camera.status.startswith(("error", "in use")):
+            color = BAD
+        else:
+            color = MUTED if camera.status == "disconnected" else WARN  # starting, restarting
         set_dot(self.dot, color)
         if camera.preview is not None and camera.status == "streaming":
             self.picture.setPixmap(to_pixmap(camera.preview, self.picture.width(), self.picture.height()))
@@ -209,8 +218,11 @@ class Hub(QMainWindow):
             self.settings.update(json.loads(SETTINGS.read_text()))
         self.log_lines = collections.deque(maxlen=300)
         self.cameras, self.searching = [], False
-        self.frontal = tracking.FrontalFrames()
         self.vision_store = vision.FrameStore()
+        self.collector = None           # calibration.Collector while taking moments
+        self.walk, self.floor = [], []  # calibration moments taken (step 1 and step 2)
+        self.result, self.computing = None, False  # last computed calibration, not yet in use
+        self.view_picked = False        # Tracking page camera choice set to the frontal camera once
         self.tracker = self.describer = self.sender = None
         self.vision_state = "off"
         self.ollama = OllamaServer()
@@ -227,6 +239,7 @@ class Hub(QMainWindow):
         row.addWidget(self.build_sidebar())
         self.pages = QStackedWidget()
         self.pages.addWidget(self.build_cameras())
+        self.pages.addWidget(self.build_calibration())
         self.pages.addWidget(self.build_tracking())
         self.pages.addWidget(self.build_space())
         self.pages.addWidget(self.build_vision())
@@ -253,7 +266,7 @@ class Hub(QMainWindow):
         layout.addWidget(label("Tracking PC", "muted"))
         layout.addSpacing(22)
         self.nav = []
-        for index, name in enumerate(["Cameras", "Tracking", "3D view", "Vision"]):
+        for index, name in enumerate(PAGES):
             button = QPushButton(name)
             button.setObjectName("nav")
             button.setCheckable(True)
@@ -262,7 +275,7 @@ class Hub(QMainWindow):
             self.nav.append(button)
         layout.addStretch()
         self.side_status = {}
-        for key in ["Cameras", "Tracking", "Vision", "Model"]:
+        for key in ["Cameras", "Calibration", "Tracking", "Vision", "Model"]:
             line = QHBoxLayout()
             indicator = dot(MUTED)
             text = label(key, "small")
@@ -300,8 +313,8 @@ class Hub(QMainWindow):
         self.disconnect_button.clicked.connect(self.disconnect_cameras)
         for button in (self.search_button, self.disconnect_button, self.connect_button):
             head.addWidget(button)
-        layout.addWidget(label("Moverse must be closed: it holds the cameras. Choose the camera on top of the wall "
-                               "as frontal; it feeds tracking and vision.", "muted", wrap=True))
+        layout.addWidget(label("Moverse must be closed: it holds the cameras. All cameras are used for tracking; "
+                               "the frontal camera (blue frame) also gives Frank's view.", "muted", wrap=True))
         grid = QGridLayout()
         grid.setSpacing(14)
         self.tiles = []
@@ -331,9 +344,77 @@ class Hub(QMainWindow):
         self.address_fields.append(field)
         return field
 
+    def build_calibration(self):
+        widget, layout, _, _ = self.page("Calibration", "Where each camera is and where it points, found with the "
+                                                        "checkerboard (11 x 8 squares of 6.5 cm)")
+        top = QHBoxLayout()
+        top.setSpacing(16)
+
+        walk, walk_box = card("1. Walk with the board")
+        walk_box.addWidget(label(
+            "Hold the board by its edges (the pattern fully visible), high (about 2 m) and within 2 to 3 m of two "
+            "neighbouring cameras, facing both; further away its squares are too small in these wide pictures. "
+            "Move slowly from pair to pair around the whole space, about 3 minutes. Green frame: that camera finds "
+            "the board now. Each camera needs 20 or more views; a view counts when another camera finds the board "
+            "at the same moment.", "small", wrap=True))
+        self.walk_button = QPushButton("Start")
+        self.walk_button.setObjectName("primary")
+        self.walk_button.clicked.connect(self.toggle_walk)
+        walk_box.addWidget(self.walk_button)
+        self.walk_info = label("", "muted", wrap=True)
+        walk_box.addWidget(self.walk_info)
+        walk_box.addStretch()
+        top.addWidget(walk, 1)
+
+        floor, floor_box = card("2. Board on the floor")
+        floor_box.addWidget(label(
+            "Lay the board flat on the floor, face up, its long side parallel to the wall, its middle in front of "
+            "the middle of the wall. Measure from the bottom of the LED wall to the near edge of the black and "
+            "white pattern (not the white border). Step away so the cameras see it.", "small", wrap=True))
+        form = QFormLayout()
+        form.addRow("Distance (cm)", self.number_field("floor_distance", 0, 500))
+        floor_box.addLayout(form)
+        self.floor_button = QPushButton("Take the floor board (2 s)")
+        self.floor_button.clicked.connect(self.take_floor)
+        floor_box.addWidget(self.floor_button)
+        self.floor_info = label("", "muted", wrap=True)
+        floor_box.addWidget(self.floor_info)
+        floor_box.addStretch()
+        top.addWidget(floor, 1)
+
+        result, result_box = card("3. Result")
+        buttons = QHBoxLayout()
+        self.compute_button = QPushButton("Compute")
+        self.compute_button.setObjectName("primary")
+        self.compute_button.clicked.connect(self.compute_calibration)
+        self.use_button = QPushButton("Use this calibration")
+        self.use_button.clicked.connect(self.use_calibration)
+        buttons.addWidget(self.compute_button)
+        buttons.addWidget(self.use_button)
+        buttons.addStretch()
+        result_box.addLayout(buttons)
+        self.result_text = QPlainTextEdit()
+        self.result_text.setReadOnly(True)
+        result_box.addWidget(self.result_text, 1)
+        top.addWidget(result, 2)
+        layout.addLayout(top, 1)
+
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        self.board_views = []
+        for i in range(8):
+            view = label(f"Camera {i + 1}", "picture")
+            view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            view.setMinimumSize(200, 125)
+            view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            grid.addWidget(view, i // 4, i % 4)
+            self.board_views.append(view)
+        layout.addLayout(grid, 1)
+        return widget
+
     def build_tracking(self):
         self.address_fields = []
-        widget, layout, head, _ = self.page("Tracking", "Head position from the frontal camera, sent to Unreal in Moverse's format")
+        widget, layout, head, _ = self.page("Tracking", "Head position from all calibrated cameras, sent to Unreal in Moverse's format")
         self.track_button = QPushButton("Start tracking")
         self.track_button.setObjectName("primary")
         self.track_button.clicked.connect(self.toggle_tracking)
@@ -348,15 +429,9 @@ class Hub(QMainWindow):
         form.addRow("Unreal PC", self.address_field())
         form.addRow("Moverse port", self.number_field("moverse_port", 0, 65535, integer=True))
         form_box.addLayout(form)
-        form_box.addWidget(label("Frontal camera in tracking space (cm; X towards the wall, Y to the right seen "
-                                 "facing the wall, Z up)", "small", wrap=True))
-        pose = QFormLayout()
-        pose.setSpacing(9)
-        for key, name in [("camera_x", "X"), ("camera_y", "Y"), ("camera_z", "Z (height)")]:
-            pose.addRow(name, self.number_field(key, -2000, 2000))
-        for key, name in [("camera_pitch", "Tilt down (deg)"), ("camera_yaw", "Turn to +Y (deg)"), ("camera_roll", "Roll (deg)")]:
-            pose.addRow(name, self.number_field(key, -180, 180))
-        form_box.addLayout(pose)
+        form_box.addWidget(label("Camera positions: from the calibration (Calibration page).", "small", wrap=True))
+        self.calibration_line = label("", "muted", wrap=True)
+        form_box.addWidget(self.calibration_line)
         form_box.addWidget(label("Smoothing (One Euro filter): lower min cutoff = calmer when still, "
                                  "higher beta = less lag when moving", "small", wrap=True))
         smooth = QFormLayout()
@@ -371,17 +446,20 @@ class Hub(QMainWindow):
         top = QHBoxLayout()
         titles = QVBoxLayout()
         titles.setSpacing(2)
-        titles.addWidget(label("Frontal camera", "cardTitle"))
+        titles.addWidget(label("What a camera sees", "cardTitle"))
         titles.addWidget(label("Click a person to make them the main person: only their head drives the 3D view "
-                               "and Frank's gaze.", "small", wrap=True))
+                               "and Frank's gaze. P1, P2, ...: the same person in every camera.", "small", wrap=True))
         top.addLayout(titles, 1)
-        self.auto_button = QPushButton("Automatic (nearest)")
+        self.view_choice = QComboBox()
+        self.view_choice.addItems([f"Camera {i + 1}" for i in range(8)])
+        top.addWidget(self.view_choice)
+        self.auto_button = QPushButton("Automatic (nearest to the wall)")
         self.auto_button.clicked.connect(self.follow_nearest)
         top.addWidget(self.auto_button)
         live_box.addLayout(top)
         self.track_picture = ClickablePicture(self.pick_person)
         self.track_picture.setObjectName("picture")
-        self.track_picture.setText("no frontal camera streaming")
+        self.track_picture.setText("camera not streaming")
         self.track_picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.track_picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         live_box.addWidget(self.track_picture, 1)
@@ -401,7 +479,7 @@ class Hub(QMainWindow):
 
     def build_space(self):
         widget, layout, _, _ = self.page("3D view", "The lab in tracking space: the LED wall, the floor and every tracked person, live")
-        self.space = space.Space(self.tracked_people)
+        self.space = space.Space(self.tracked_people, self.calibrated_cameras)
         frame, box = card()
         box.setContentsMargins(2, 2, 2, 2)
         box.addWidget(self.space)
@@ -417,9 +495,14 @@ class Hub(QMainWindow):
         found = []
         for person in tracker.people:
             main = person["number"] == tracker.main
-            position = tracker.position if main and tracker.position is not None else person["world"]
+            position = tracker.position if main and tracker.position is not None else person["position"]
             found.append((person["number"], main, position))
         return found
+
+    def calibrated_cameras(self):
+        """[(number, position, looking direction)] of the cameras in the calibration in use, for the 3D view."""
+        poses = (self.settings.get("calibration") or {}).get("cameras", {})
+        return [(p["number"], np.array(p["position"]), np.array(p["rotation"]) @ [0.0, 0.0, 1.0]) for p in poses.values()]
 
     def build_vision(self):
         widget, layout, head, _ = self.page("Vision", "Local vision model; Frank gets a description of the people in front of the wall")
@@ -517,65 +600,69 @@ class Hub(QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def connect_cameras(self):
+        """Start every camera at once (each in its own helper program)."""
         for camera in self.cameras:
             if camera.worker is None and camera.state == "available":
-                self.start_worker(camera)
-
-    def start_worker(self, camera):
-        frontal = camera.device_id == self.settings["frontal_id"]
-        camera.worker = cameras.CameraWorker(camera, self.frontal if frontal else None,
-                                             self.vision_store if frontal else None, self.log)
-        camera.worker.start()
-
-    def stop_worker(self, camera):
-        if camera.worker is not None:
-            camera.worker.running = False
-            camera.worker.join(timeout=5)
-            camera.worker = None
-            camera.status, camera.preview = "found", None
+                camera.vision = self.vision_store if camera.device_id == self.settings["frontal_id"] else None
+                worker = cameras.WebcamWorker if camera.device_id == cameras.WEBCAM else cameras.CameraWorker
+                camera.worker = worker(camera, self.log)
+                camera.worker.start()
 
     def disconnect_cameras(self):
         self.stop_tracking()
         self.stop_vision()
+        if self.collector:
+            self.collector.running = False
+        for camera in self.cameras:  # all at once: each helper takes a few seconds to close its camera
+            if camera.worker is not None:
+                camera.worker.running = False
         for camera in self.cameras:
-            self.stop_worker(camera)
+            if camera.worker is not None:
+                camera.worker.join(timeout=8)
+                camera.worker = None
+                camera.status, camera.preview, camera.latest, camera.vision = "found", None, None, None
 
     def use_as_frontal(self, camera):
-        old = next((c for c in self.cameras if c.device_id == self.settings["frontal_id"]), None)
+        """Frank's view comes from this camera from now on (no reconnecting: all cameras send the same)."""
+        for c in self.cameras:
+            c.vision = None
         self.change("frontal_id", camera.device_id)
-        self.frontal.intrinsics = None
-        for c in (old, camera):  # reconnect both, so the new frontal camera also sends depth
-            if c is not None and c.worker is not None:
-                self.stop_worker(c)
-                self.start_worker(c)
+        self.vision_store.clear()
+        if camera.worker is not None:
+            camera.vision = self.vision_store
 
     def frontal_streaming(self):
         return any(c.device_id == self.settings["frontal_id"] and c.status == "streaming" for c in self.cameras)
 
     def main_person(self):
         """(number, box, others seen, position text) of the tracker's main person for the vision model, or None
-        (no tracking or nobody). The position comes from the tracker: distance from the wall (the frontal camera
-        is on the wall) and side as Frank sees it (+Y, the visitor's right, is Frank's left)."""
+        (no tracking, or the frontal camera does not see the main person). Distance from the wall and side as
+        Frank sees it (+Y, the visitor's right, is Frank's left)."""
         tracker = self.tracker
-        main = tracker.main_box() if tracker else None
+        main = tracker.main_box(self.settings["frontal_id"]) if tracker else None
         position = tracker.position if tracker else None
         if main is None or position is None:
             return None
-        distance = (self.settings["camera_x"] - position[0]) / 100
-        side = (position[1] - self.settings["camera_y"]) / 100
+        distance = (calibration.WALL_X - position[0]) / 100
+        side = (position[1] - calibration.WALL_Y) / 100
         where = "in the middle" if abs(side) < 0.3 else f"{abs(side):.1f} m to Frank's {'left' if side > 0 else 'right'}"
         return main[0], main[1], len(tracker.people) > 1, f"about {distance:.1f} m from the wall, {where}"
 
+    def shown_camera(self):
+        index = self.view_choice.currentIndex()
+        return self.cameras[index] if 0 <= index < len(self.cameras) else None
+
     def pick_person(self, x, y):
-        if self.tracker:
-            number = self.tracker.select(x, y)
+        camera = self.shown_camera()
+        if self.tracker and camera:
+            number = self.tracker.select(camera.device_id, x, y)
             if number is not None:
                 self.log(f"tracking: main person P{number} (clicked)")
 
     def follow_nearest(self):
         if self.tracker:
             self.tracker.automatic()
-            self.log("tracking: main person chosen automatically (nearest)")
+            self.log("tracking: main person chosen automatically (nearest to the wall)")
 
     def toggle_tracking(self):
         if self.tracker:
@@ -585,18 +672,74 @@ class Hub(QMainWindow):
 
     def start_tracking(self):
         s = self.settings
-        if not (s["unreal_address"] and s["moverse_port"] and self.frontal_streaming()):
-            self.log("tracking needs the frontal camera streaming, the Unreal PC address and the Moverse port")
+        poses = (s.get("calibration") or {}).get("cameras", {})
+        ready = [c for c in self.cameras if c.status == "streaming" and c.device_id in poses]
+        if not (s["unreal_address"] and s["moverse_port"]) or len(ready) < 2:
+            self.log("tracking needs the calibration (Calibration page), two or more calibrated cameras streaming, "
+                     "the Unreal PC address and the Moverse port")
             return
-        self.tracker = tracking.Tracker(self.frontal, dict(s), self.log)
+        self.tracker = tracking.Tracker(ready, poses, dict(s), self.log)
         self.tracker.start()
-        self.log(f"tracking started, sending to {s['unreal_address']}:{s['moverse_port']}")
+        self.log(f"tracking started with {len(ready)} cameras, sending to {s['unreal_address']}:{s['moverse_port']}")
 
     def stop_tracking(self):
         if self.tracker:
-            self.tracker.running = False
+            self.tracker.stop()
             self.tracker = None
             self.log("tracking stopped")
+
+    # ---------- calibration ----------
+
+    def calibratable(self):
+        """[(number, Camera)] of the OAK cameras streaming with their lens data."""
+        return [(i + 1, c) for i, c in enumerate(self.cameras)
+                if c.status == "streaming" and c.lens and c.device_id != cameras.WEBCAM]
+
+    def toggle_walk(self):
+        if self.collector and self.collector.running:
+            self.collector.running = False
+            self.log(f"calibration: walk stopped, {len(self.walk)} moments")
+            return
+        found = self.calibratable()
+        if len(found) < 2:
+            self.log("calibration needs two or more cameras streaming")
+            return
+        self.collector = calibration.Collector(found, "walk", self.log)
+        self.walk = self.collector.shots  # the same list, filled while walking
+        self.collector.start()
+        self.log("calibration: walk started")
+
+    def take_floor(self):
+        found = self.calibratable()
+        if not found or (self.collector and self.collector.running):
+            return
+        self.collector = calibration.Collector(found, "floor", self.log)
+        self.floor = self.collector.shots
+        self.collector.start()
+
+    def compute_calibration(self):
+        if self.computing:
+            return
+        lenses = {i + 1: (c.device_id, c.lens) for i, c in enumerate(self.cameras) if c.lens and c.device_id != cameras.WEBCAM}
+        walk, floor, distance = list(self.walk), list(self.floor), float(self.settings["floor_distance"])
+        self.computing, self.result = True, None
+
+        def work():
+            try:
+                self.result = calibration.solve(walk, floor, lenses, distance)
+                self.log(f"calibration computed: score {self.result['score']}")
+            except (ValueError, np.linalg.LinAlgError, cv2.error) as error:
+                self.result = {"error": str(error)}
+                self.log(f"calibration failed: {error}")
+            self.computing = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def use_calibration(self):
+        if self.result and "cameras" in self.result:
+            self.change("calibration", {"cameras": self.result["cameras"], "score": self.result["score"],
+                                        "report": self.result["report"], "made": time.strftime("%Y-%m-%d %H:%M")})
+            self.log(f"calibration in use (score {self.result['score']}), saved in hub.local.json")
 
     def toggle_vision(self):
         if self.describer or self.vision_state == "loading":
@@ -650,6 +793,11 @@ class Hub(QMainWindow):
     # ---------- refresh ----------
 
     def refresh(self):
+        if not self.view_picked and self.cameras:  # show the frontal camera on the Tracking page at first
+            frontal = [i for i, c in enumerate(self.cameras) if c.device_id == self.settings["frontal_id"]]
+            if frontal:
+                self.view_choice.setCurrentIndex(frontal[0])
+            self.view_picked = True
         for i, tile in enumerate(self.tiles):
             camera = self.cameras[i] if i < len(self.cameras) else None
             tile.show_camera(camera, camera is not None and camera.device_id == self.settings["frontal_id"])
@@ -659,42 +807,102 @@ class Hub(QMainWindow):
         self.connect_button.setEnabled(not self.searching and any(c.worker is None and c.state == "available" for c in self.cameras))
         self.disconnect_button.setEnabled(any(c.worker is not None for c in self.cameras))
         self.search_button.setEnabled(not self.searching)
+        self.refresh_calibration()
         self.refresh_tracking()
         self.refresh_vision()
         self.refresh_sidebar(streaming)
 
+    def refresh_calibration(self):
+        collector = self.collector
+        busy = bool(collector and collector.running)
+        walking = busy and collector.mode == "walk"
+        self.walk_button.setText("Stop" if walking else "Start")
+        set_variant(self.walk_button, "stop" if walking else "primary")
+        self.walk_button.setEnabled(not busy or walking)
+        self.floor_button.setEnabled(not busy)
+        views = collections.Counter(n for shot in list(self.walk) for n in shot)
+        if self.walk or walking:
+            lines = [f"{len(self.walk)} moments with two or more cameras"]
+            lines += ["  ".join(f"Camera {n}: {views[n]}" for n in range(row, row + 4)) for row in (1, 5)]
+            self.walk_info.setText("\n".join(lines))
+        else:
+            self.walk_info.setText("Not started.")
+        if busy and collector.mode == "floor":
+            self.floor_info.setText("Taking the floor board...")
+        elif self.floor:
+            seen = sorted({n for shot in self.floor for n in shot})
+            self.floor_info.setText(f"Seen by camera(s) {', '.join(map(str, seen))} in {len(self.floor)} moments.")
+        else:
+            self.floor_info.setText("Not taken yet.")
+        self.compute_button.setEnabled(bool(self.walk and self.floor) and not self.computing and not busy)
+        self.use_button.setEnabled(bool(self.result and "cameras" in self.result))
+        used = self.settings.get("calibration")
+        in_use = f"In use: score {used['score']}, made {used['made']}." if used else "In use: none (tracking needs one)."
+        if self.computing:
+            text = "Computing (up to a minute)..."
+        elif self.result and "error" in self.result:
+            text = f"Did not work: {self.result['error']}"
+        elif self.result:
+            text = "\n".join(self.result["report"]) + "\n\nNot in use yet: press Use this calibration."
+        else:
+            text = "\n".join(used["report"]) if used else ""
+        text = f"{in_use}\n\n{text}".strip()
+        if self.result_text.toPlainText() != text:
+            self.result_text.setPlainText(text)
+        if self.pages.currentIndex() != PAGES.index("Calibration"):
+            return
+        now = time.monotonic()
+        for i, view in enumerate(self.board_views):
+            camera = self.cameras[i] if i < len(self.cameras) else None
+            if camera is None or camera.preview is None or camera.status != "streaming":
+                view.setPixmap(QPixmap())
+                view.setText(f"Camera {i + 1}")
+                continue
+            image = camera.preview.copy()
+            if collector is not None and now - collector.seen.get(i + 1, -10.0) < 0.6:
+                cv2.rectangle(image, (1, 1), (image.shape[1] - 2, image.shape[0] - 2), (80, 200, 120), 4)
+            cv2.putText(image, f"{i + 1}  {views[i + 1]}", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            view.setPixmap(to_pixmap(image, view.width(), view.height()))
+
     def refresh_tracking(self):
-        with self.frontal.lock:
-            color = self.frontal.color
         tracker = self.tracker
-        if color is not None and self.frontal_streaming() and self.pages.currentIndex() == 1:
-            image = cv2.resize(color[0], (960, 960 * color[0].shape[0] // color[0].shape[1]))
-            w, h = image.shape[1], image.shape[0]
-            for person in (tracker.people if tracker else []):
-                main = person["number"] == tracker.main
-                box, head = person["box"], person["head"]
-                colour = (246, 130, 59) if main else (150, 150, 150)  # blue accent for the main person, else grey
-                x0, y0 = int(box[0] * w), int(box[1] * h)
-                cv2.rectangle(image, (x0, y0), (int(box[2] * w), int(box[3] * h)), colour, 3 if main else 1)
-                cv2.circle(image, (int(head[0] * w), int(head[1] * h)), 6, (80, 200, 120) if main else colour, -1)
-                name = f"P{person['number']}" + ("  MAIN" if main else "")
-                cv2.rectangle(image, (x0, max(0, y0 - 24)), (x0 + 13 * len(name) + 10, max(24, y0)), colour, -1)
-                cv2.putText(image, name, (x0 + 5, max(18, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            self.track_picture.setPixmap(to_pixmap(image, self.track_picture.width(), self.track_picture.height()))
+        camera = self.shown_camera()
+        if self.pages.currentIndex() == PAGES.index("Tracking"):
+            if camera and camera.latest and camera.status == "streaming":
+                image = cv2.imdecode(np.frombuffer(camera.latest[0], np.uint8), cv2.IMREAD_REDUCED_COLOR_2)
+                w, h = image.shape[1], image.shape[0]
+                for box, head, number in (tracker.seen_by(camera.device_id) if tracker else []):
+                    main = number is not None and number == tracker.main
+                    colour = (246, 130, 59) if main else (150, 150, 150)  # blue accent for the main person, else grey
+                    x0, y0 = int(box[0] * w), int(box[1] * h)
+                    cv2.rectangle(image, (x0, y0), (int(box[2] * w), int(box[3] * h)), colour, 3 if main else 1)
+                    cv2.circle(image, (int(head[0] * w), int(head[1] * h)), 5, (80, 200, 120) if main else colour, -1)
+                    name = (f"P{number}" if number is not None else "?") + ("  MAIN" if main else "")
+                    cv2.rectangle(image, (x0, max(0, y0 - 22)), (x0 + 12 * len(name) + 10, max(22, y0)), colour, -1)
+                    cv2.putText(image, name, (x0 + 5, max(16, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+                self.track_picture.setPixmap(to_pixmap(image, self.track_picture.width(), self.track_picture.height()))
+            else:
+                self.track_picture.setPixmap(QPixmap())
+                self.track_picture.setText("camera not streaming")
+        used = self.settings.get("calibration")
+        self.calibration_line.setText(f"Calibration in use: score {used['score']}, {len(used['cameras'])} cameras, "
+                                      f"made {used['made']}." if used else "No calibration yet: tracking needs one.")
         position = tracker.position if tracker else None
         for key, index in (("X", 0), ("Y", 1), ("Z", 2)):
             self.track_values[key].setText(f"{position[index]:.1f}" if position is not None else "-")
         self.track_values["Rate"].setText(f"{tracker.rate:.0f}" if tracker else "-")
         self.auto_button.setEnabled(bool(tracker and tracker.chosen))
         if tracker:
-            count = len(tracker.people)
-            if tracker.main is not None and position is not None:
-                how = "clicked" if tracker.chosen else "automatic: nearest"
-                seen = f"{count} seen, main person P{tracker.main} ({how}), distance from {tracker.distance_from}"
+            people = list(tracker.people)
+            main = next((p for p in people if p["number"] == tracker.main), None)
+            if main is not None and position is not None:
+                how = "clicked" if tracker.chosen else "automatic: nearest to the wall"
+                seen = (f"{len(people)} seen, main person P{tracker.main} ({how}), seen by camera(s) "
+                        + ", ".join(map(str, main["cameras"])))
             elif tracker.chosen:
-                seen = f"{count} seen, waiting for P{tracker.main} (clicked) to be visible again"
+                seen = f"{len(people)} seen, waiting for P{tracker.main} (clicked) to be visible again"
             else:
-                seen = f"{count} seen" if count else "nobody found"
+                seen = f"{len(people)} seen" if people else "nobody found (a person needs two cameras)"
             self.track_info.setText(f"{seen}  |  {tracker.status}  |  {tracker.sent} packets sent to "
                                     f"{self.settings['unreal_address']}:{self.settings['moverse_port']}")
         else:
@@ -743,8 +951,10 @@ class Hub(QMainWindow):
 
     def refresh_sidebar(self, streaming):
         model_ready = self.ollama_state is not None and self.settings["model"] in self.ollama_state["loaded"]
+        used = self.settings.get("calibration")
         rows = {
             "Cameras": (f"Cameras  {streaming}/8 streaming", OK if streaming else MUTED),
+            "Calibration": (f"Calibration  score {used['score']}" if used else "Calibration  none", OK if used else MUTED),
             "Tracking": ("Tracking  on" if self.tracker else "Tracking  off", OK if self.tracker else MUTED),
             "Vision": (f"Vision  {self.vision_state}", OK if self.vision_state == "on" else WARN if self.vision_state == "loading" else MUTED),
             "Model": ("Model  ready" if model_ready else "Model  not loaded", OK if model_ready else MUTED),

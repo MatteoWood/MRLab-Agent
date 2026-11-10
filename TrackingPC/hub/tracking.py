@@ -1,22 +1,25 @@
-"""Fast head tracker (Step 8B, first version, not tested with an OAK camera yet).
+"""Head tracker with all calibrated cameras (Step 8B).
 
-The frontal camera only delivers pictures: colour, and stereo depth aligned to the colour picture.
-Everything else runs here on the tracking PC: the pose model (YOLO11 nano pose, hub/pose.py, on the
-graphics card or the processor, whichever is faster) finds the people and their body points; the head
-point is the middle of the eyes (else the nose, else the ears); its distance is the median depth around
-that point, or, without depth (webcam test), estimated from the eye distance (about EYE_DISTANCE_MM).
-The point in camera space is moved into the tracking space NDC_Basic uses (cm; X towards the wall, Y to
-the right seen facing the wall, Z height above the floor) with the camera pose from the settings,
-smoothed with a One Euro filter, and sent to the Unreal PC in Moverse's packet format (subject Actor0,
-25 moverserig bones, head at the point), so the Moverse Live Link plugin, NDC_Basic and the gaze work
-unchanged. When nobody is seen for LOST_AFTER seconds nothing is sent, so the subject turns Unresponsive.
-Moverse must not run at the same time (two senders on one port).
-
-Several people: every visible person gets a number that follows them from frame to frame (nearest head
-point). Only the main person's head is sent. The main person is the one clicked in the hub's window;
-without a click (or when the clicked person has been gone for KEEP_CHOSEN seconds) it is the person
-nearest to the camera, kept while visible.
+The cameras only deliver pictures. In each camera's helper program (hub/cameras.py) the pose model
+(YOLO11 nano pose, hub/pose.py, on this PC's graphics card) finds the people and their body points. Here,
+for every person a camera sees, the head point in the picture (the middle of the eyes; if not both eyes
+are visible, the middle of the visible face points: nose, eyes, ears) becomes a line of sight in the room,
+from the camera's lens (factory calibration) and its position (the hub's calibration, hub/calibration.py).
+Where the lines of sight of several cameras meet is the head: the point closest to all of them, each
+weighted by 1 / distance squared (a far camera's line is less sure). Eye lines are used when at least
+two cameras see both eyes, else all face lines. One camera alone gives no position (no depth is used):
+the person keeps their last position for up to LOST_AFTER seconds.
+People across cameras: a person found before is looked for along each camera's lines (within TRACK_GATE
+of their last position); the remaining lines are paired where two cameras' lines nearly cross (within
+GATE) at a head height, then joined by other cameras' lines passing as close. Each person keeps a number
+while seen. The main person (clicked in the window, else the one nearest to the wall) is smoothed with a
+One Euro filter and sent to the Unreal PC in Moverse's packet format (subject Actor0, 25 moverserig bones,
+head at the point) at every update, so the Moverse Live Link plugin, NDC_Basic and the gaze work
+unchanged. Pictures older than MAX_AGE are not combined. Moverse must not run at the same time (two
+senders on one port).
 """
+import collections
+import itertools
 import json
 import math
 import socket
@@ -25,14 +28,18 @@ import time
 
 import numpy as np
 
-from hub import pose
+from hub import calibration, pose
 
-EYE_DISTANCE_MM = 63.0
 MIN_POINT_CONFIDENCE = 0.5
+FACE = (pose.NOSE, pose.LEFT_EYE, pose.RIGHT_EYE, pose.LEFT_EAR, pose.RIGHT_EAR)
+MAX_AGE = 0.05            # s: older pictures are not combined
+GATE = 15.0               # cm: lines of one head pass at most this far from it
+TRACK_GATE = 30.0         # cm: a known person's head moves less than this between updates
+HEAD_HEIGHT = (40.0, 240.0)  # cm above the floor
+MIN_INTERVAL = 1 / 120    # s between updates
 LOST_AFTER = 0.5
-MATCH_DISTANCE = 0.1  # a head moves less than this (fraction of the image) between two frames
-FORGET_AFTER = 2.0    # seconds a person may be unseen and keep their number
-KEEP_CHOSEN = 2.0     # seconds the clicked main person may be unseen before the nearest is followed again
+FORGET_AFTER = 2.0        # seconds a person may be unseen and keep their number
+KEEP_CHOSEN = 2.0         # seconds the clicked main person may be unseen before the nearest is followed again
 SUBJECT = "Actor0"
 
 # Moverse rig (from /Game/Actor0/asset): name, parent index, location relative to the parent.
@@ -96,18 +103,6 @@ def frame_packet(head, offset):
     return json.dumps({SUBJECT: [{"Type": "CharacterAnimation"}] + bones}, separators=(",", ":")).encode()
 
 
-def camera_rotation(yaw, pitch, roll):
-    """Camera axes (x right, y down, z forward in the image) to tracking axes, angles in degrees.
-
-    With all angles 0 the camera looks straight away from the wall (-X), level. pitch > 0 tilts it down,
-    yaw > 0 turns it towards +Y, roll > 0 turns the image clockwise as seen from behind the camera.
-    """
-    y, p, r = (math.radians(a) for a in (yaw, pitch, roll))
-    base = np.array([[0, 0, -1], [-1, 0, 0], [0, -1, 0]], float)  # columns: camera x, y, z in tracking axes
-    tilt = np.array([[1, 0, 0], [0, math.cos(p), math.sin(p)], [0, -math.sin(p), math.cos(p)]])
-    turn = np.array([[math.cos(-y), -math.sin(-y), 0], [math.sin(-y), math.cos(-y), 0], [0, 0, 1]])
-    spin = np.array([[math.cos(r), -math.sin(r), 0], [math.sin(r), math.cos(r), 0], [0, 0, 1]])
-    return turn @ base @ tilt @ spin
 
 
 class OneEuro:
@@ -135,101 +130,186 @@ class OneEuro:
         return self.x
 
 
-class FrontalFrames:
-    """Newest colour frame of the frontal camera, its depth and the colour camera's intrinsics."""
 
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.color = None  # (BGR image, capture time)
-        self.depth = None  # uint16 depth in mm aligned to the colour image (any size, same aspect), or None
-        self.intrinsics = None  # (fx, fy, cx, cy) at the colour image size
-        self.seq = 0
 
-    def publish(self, color, captured, depth=None):
-        with self.lock:
-            self.color, self.depth, self.seq = (color, captured), depth, self.seq + 1
+# ---------- lines of sight ----------
+
+def distance_to_line(point, line):
+    """Distance of a point from a line of sight (infinite behind the camera)."""
+    v = point - line["origin"]
+    along = v @ line["direction"]
+    return float(np.linalg.norm(v - along * line["direction"])) if along > 0 else math.inf
+
+
+def crossing(a, b):
+    """Middle of the closest approach of two lines of sight and how far apart they pass, or None."""
+    w = a["origin"] - b["origin"]
+    k = a["direction"] @ b["direction"]
+    d, e = a["direction"] @ w, b["direction"] @ w
+    den = 1.0 - k * k
+    if den < 1e-6:
+        return None
+    s, t = (k * e - d) / den, (e - k * d) / den
+    if s <= 0 or t <= 0:
+        return None
+    pa, pb = a["origin"] + s * a["direction"], b["origin"] + t * b["direction"]
+    return (pa + pb) / 2, float(np.linalg.norm(pa - pb))
+
+
+def closest_point(lines):
+    """Point nearest to all lines of sight, each weighted by 1 / distance squared (two passes), or None."""
+    point = None
+    for _ in range(2):
+        a, b = np.zeros((3, 3)), np.zeros(3)
+        for line in lines:
+            weight = 1.0 if point is None else 1.0 / max(1.0, float(np.linalg.norm(point - line["origin"]))) ** 2
+            p = np.eye(3) - np.outer(line["direction"], line["direction"])
+            a += weight * p
+            b += weight * p @ line["origin"]
+        if np.linalg.cond(a) > 1e8:
+            return None
+        point = np.linalg.solve(a, b)
+    return point
 
 
 class Tracker(threading.Thread):
-    def __init__(self, frames, settings, log=print):
+    def __init__(self, cameras, poses, settings, log=print):
+        """cameras: [Camera] streaming; poses: {device id: {"number", "rotation", "position"}} (calibration)."""
         super().__init__(daemon=True)
-        self.frames, self.settings, self.log = frames, settings, log
+        self.settings, self.log = settings, log
         self.running = True
-        self.model = None
-        self.tracks = {}       # number -> person (also people unseen for up to FORGET_AFTER seconds)
+        self.cameras = [c for c in cameras if c.device_id in poses and c.lens and c.worker]
+        self.poses = {c.device_id: (int(poses[c.device_id]["number"]), np.array(poses[c.device_id]["rotation"]),
+                                    np.array(poses[c.device_id]["position"])) for c in self.cameras}
+        self.wake = threading.Condition()
+        self.views = {}        # device id -> (capture time, [lines of sight]), newest picture per camera
+        self.tracks = {}       # number -> {"position", "seen", "cameras"} (also unseen for up to FORGET_AFTER)
         self.next_number = 1
         self.main_seen = 0.0   # when the main person was last seen
         # Shown in the window (read by the window's thread):
-        self.status = "loading the pose model"
-        self.people = []       # people seen in the newest frame: number, point (camera mm), world (tracking
-                               # space cm, lightly smoothed, for the 3D view), box and head (fractions of
-                               # the colour image), source of the distance
+        self.status = "starting"
+        self.people = []       # [{"number", "position" (cm), "cameras" (numbers)}] seen in the last LOST_AFTER s
         self.main = None       # number of the main person, whose head is sent
-        self.chosen = False    # main person chosen by a click (else: automatic, the nearest)
-        self.position = None   # filtered head position of the main person in tracking space (cm)
-        self.distance_from = ""  # how the main person's distance was found
-        self.rate = 0.0        # tracked frames per second
+        self.chosen = False    # main person chosen by a click (else: automatic, nearest to the wall)
+        self.position = None   # filtered head position of the main person (cm)
+        self.rate = 0.0        # updates of the main person per second
         self.sent = 0
+        for camera in self.cameras:
+            camera.on_people = self.on_people
 
-    def select(self, x, y):
-        """Make the person under (x, y) (fractions of the colour image) the main person; their number or None."""
-        hits = [p for p in self.people if p["box"][0] <= x <= p["box"][2] and p["box"][1] <= y <= p["box"][3]]
+    def stop(self):
+        self.running = False
+        for camera in self.cameras:
+            camera.on_people = None
+            camera.worker.pose(None)
+
+    # ---------- called from the camera threads ----------
+
+    def on_people(self, camera, captured, people):
+        number, rotation, origin = self.poses[camera.device_id]
+        w, h = camera.lens["size"]
+        heads = []
+        for box, points, _ in people:
+            good = points[:, 2] >= MIN_POINT_CONFIDENCE
+            if good[pose.LEFT_EYE] and good[pose.RIGHT_EYE]:
+                chosen, kind = [pose.LEFT_EYE, pose.RIGHT_EYE], "eyes"
+            else:
+                chosen, kind = [i for i in FACE if good[i]], "face"
+                if not chosen:
+                    continue
+            heads.append((points[chosen, :2].mean(0), kind, box))
+        lines = []
+        if heads:
+            normalized = calibration.normalize([head for head, _, _ in heads], camera.lens)
+            for (head, kind, box), (x, y) in zip(heads, normalized):
+                direction = rotation @ np.array([x, y, 1.0])
+                lines.append({"camera": number, "origin": origin, "direction": direction / np.linalg.norm(direction),
+                              "kind": kind, "box": (box[0] / w, box[1] / h, box[2] / w, box[3] / h),
+                              "head": (head[0] / w, head[1] / h), "number": None})
+        with self.wake:
+            self.views[camera.device_id] = (captured, lines)
+            self.wake.notify()
+
+    # ---------- for the window ----------
+
+    def seen_by(self, device_id):
+        """[(box, head, person number or None)] in that camera's newest picture (fractions of the picture)."""
+        with self.wake:
+            captured, lines = self.views.get(device_id, (0.0, []))
+        if time.monotonic() - captured > 0.5:
+            return []
+        return [(line["box"], line["head"], line["number"]) for line in lines]
+
+    def select(self, device_id, x, y):
+        """Make the person under (x, y) in that camera's picture the main person; their number or None."""
+        hits = [(box, number) for box, _, number in self.seen_by(device_id)
+                if number is not None and box[0] <= x <= box[2] and box[1] <= y <= box[3]]
         if not hits:
             return None
-        person = min(hits, key=lambda p: (p["box"][2] - p["box"][0]) * (p["box"][3] - p["box"][1]))
-        self.main, self.chosen, self.main_seen = person["number"], True, time.monotonic()
-        return person["number"]
+        _, number = min(hits, key=lambda hit: (hit[0][2] - hit[0][0]) * (hit[0][3] - hit[0][1]))
+        self.main, self.chosen, self.main_seen = number, True, time.monotonic()
+        return number
 
     def automatic(self):
-        """Follow the nearest person again (keeps the current main person while visible)."""
+        """Follow the person nearest to the wall again (keeps the current main person while visible)."""
         self.chosen = False
 
-    def main_box(self):
-        """(number, box as fractions) of the main person while visible, else None (for the vision model)."""
-        for person in self.people:
-            if person["number"] == self.main:
-                return person["number"], person["box"]
+    def main_box(self, device_id):
+        """(number, box as fractions) of the main person in that camera's picture, else None (for vision)."""
+        for box, _, number in self.seen_by(device_id):
+            if number is not None and number == self.main:
+                return number, box
         return None
 
+    # ---------- combining ----------
+
     def run(self):
+        self.status = "timing the pose model"
         try:
-            self.model = pose.PoseModel(self.log)
+            model = pose.PoseModel(self.log)
         except Exception as error:  # model file or runtime missing: shown in the window and the log
             self.status = f"pose model not available: {error}"
             self.log(self.status)
             return
-        self.status = f"pose model on the {self.model.device}, {self.model.ms:.0f} ms per frame"
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if not self.running:
+            return
+        for camera in self.cameras:
+            camera.worker.pose(model.device)
+        self.status = f"pose model on the {model.device} ({model.ms:.0f} ms per picture), {len(self.cameras)} cameras"
+        del model
         s = self.settings
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         address = (s["unreal_address"], int(s["moverse_port"]))
-        rotation = camera_rotation(s["camera_yaw"], s["camera_pitch"], s["camera_roll"])
-        translation = np.array([s["camera_x"], s["camera_y"], s["camera_z"]], float)
-        self.to_world = lambda point: translation + rotation @ (point / 10.0)  # camera mm to tracking cm
         smooth = OneEuro(s["filter_min_cutoff"], s["filter_beta"])
         offset, subject = head_offset(), subject_packet()
-        last_seq, last_seen, last_subject, last_main, times = 0, 0.0, 0.0, None, []
+        last_update = last_seen = last_subject = last_time = 0.0
+        last_main, times = None, []
         while self.running:
-            with self.frames.lock:
-                seq, color, depth, intrinsics = self.frames.seq, self.frames.color, self.frames.depth, self.frames.intrinsics
-            if seq == last_seq or color is None or intrinsics is None:
-                time.sleep(0.002)
+            with self.wake:
+                self.wake.wait(0.1)
+            wait = MIN_INTERVAL - (time.monotonic() - last_update)
+            if wait > 0:
+                time.sleep(wait)
+            now = last_update = time.monotonic()
+            with self.wake:
+                views = {k: v for k, v in self.views.items() if now - v[0] <= MAX_AGE}
+            if not views:
                 continue
-            last_seq = seq  # the newest frame only: frames that came while the model ran are skipped
-            image, captured = color
-            now = time.monotonic()
-            self.number_people(self.detect(image, depth, intrinsics), now)
+            newest = max(captured for captured, _ in views.values())
+            located = self.locate([line for _, lines in views.values() for line in lines], now)
             main = self.choose_main(now)
-            if main is None:
+            if main is None or main not in located:
                 if now - last_seen > LOST_AFTER:
                     self.position = None
                     smooth.t = None  # start fresh when someone comes back
                 continue
-            if main["number"] != last_main:
+            if newest <= last_time:
+                continue  # nothing new since the last update
+            if main != last_main:
                 smooth.t = None  # another person: no gliding from the old one's position
-                last_main = main["number"]
-            last_seen = now
-            self.distance_from = main["source"]
-            head = smooth(self.to_world(main["point"]), captured)
+                last_main = main
+            last_seen, last_time = now, newest
+            head = smooth(located[main], newest)
             self.position = head
             times = [t for t in times if now - t < 1.0] + [now]
             self.rate = len(times)
@@ -243,86 +323,98 @@ class Tracker(threading.Thread):
                 self.log(f"tracking: send failed: {error}")
                 time.sleep(0.5)
 
-    def detect(self, image, depth, intrinsics):
-        """Head point of every person in the image: camera space in mm (x right, y down, z forward), with
-        the person box and the head point as fractions of the image and where the distance came from."""
-        h, w = image.shape[:2]
-        fx, fy, cx, cy = intrinsics
-        heads = []
-        for person in self.model(image):
-            points = person["points"]
-
-            def good(i):
-                return points[i, 2] >= MIN_POINT_CONFIDENCE
-
-            for group in ((pose.LEFT_EYE, pose.RIGHT_EYE), (pose.NOSE,), (pose.LEFT_EAR, pose.RIGHT_EAR)):
-                if all(good(i) for i in group):
-                    u, v = points[list(group), :2].mean(0)
-                    break
-            else:
-                continue  # head not seen
-            z, source = None, ""
-            if depth is not None:
-                sx, sy = depth.shape[1] / w, depth.shape[0] / h
-                du, dv, r = int(u * sx), int(v * sy), max(2, int(6 * sx))
-                patch = depth[max(0, dv - r):dv + r + 1, max(0, du - r):du + r + 1]
-                valid = patch[patch > 0]
-                if valid.size >= 5:
-                    z, source = float(np.median(valid)), "camera depth"
-            if z is None and good(pose.LEFT_EYE) and good(pose.RIGHT_EYE):
-                eyes = np.linalg.norm(points[pose.LEFT_EYE, :2] - points[pose.RIGHT_EYE, :2])
-                if eyes > 2:
-                    z, source = fx * EYE_DISTANCE_MM / eyes, "eye distance"
-            if z is None:
-                continue
-            box = person["box"]
-            point = np.array([(u - cx) * z / fx, (v - cy) * z / fy, z])
-            heads.append({
-                "point": point,
-                "world": self.to_world(point),
-                "box": (box[0] / w, box[1] / h, box[2] / w, box[3] / h),
-                "head": (u / w, v / h),
-                "source": source,
-            })
-        return heads
-
-    def number_people(self, heads, now):
-        """Give each head the number of the nearest person seen before (within MATCH_DISTANCE), else a new one."""
-        pairs = sorted(
-            (math.dist(head["head"], track["head"]), i, number)
-            for i, head in enumerate(heads) for number, track in self.tracks.items())
-        used_heads, used_numbers = set(), set()
-        for distance, i, number in pairs:
-            if distance > MATCH_DISTANCE:
+    def locate(self, lines, now):
+        """Gives each line of sight the number of its person; {number: head position} of the people seen by
+        two or more cameras now."""
+        taken, members = set(), collections.defaultdict(list)
+        # People seen before: from each camera, the line passing nearest to their last position.
+        pairs = sorted((distance_to_line(track["position"], line), number, i)
+                       for number, track in self.tracks.items() for i, line in enumerate(lines))
+        slots = set()
+        for gap, number, i in pairs:
+            if gap > TRACK_GATE:
                 break
-            if i in used_heads or number in used_numbers:
+            if i in taken or (number, lines[i]["camera"]) in slots:
                 continue
-            heads[i]["number"] = number
-            heads[i]["world"] = 0.5 * heads[i]["world"] + 0.5 * self.tracks[number]["world"]  # calmer in the 3D view
-            used_heads.add(i)
-            used_numbers.add(number)
-        for head in heads:
-            if "number" not in head:
-                head["number"] = self.next_number
-                self.next_number += 1
-            head["seen"] = now
-            self.tracks[head["number"]] = head
+            taken.add(i)
+            slots.add((number, lines[i]["camera"]))
+            members[number].append(i)
+        located = {}
+        for number, chosen in members.items():
+            point = self.triangulate([lines[i] for i in chosen])
+            for i in chosen:
+                lines[i]["number"] = number
+            if point is not None:
+                located[number] = point
+        # New people: two cameras' lines that nearly cross at a head height, joined by others passing close.
+        rest = [i for i in range(len(lines)) if i not in taken]
+        candidates = []
+        for a, b in itertools.combinations(rest, 2):
+            if lines[a]["camera"] == lines[b]["camera"]:
+                continue
+            met = crossing(lines[a], lines[b])
+            if met and met[1] < GATE and HEAD_HEIGHT[0] <= met[0][2] <= HEAD_HEIGHT[1]:
+                candidates.append((met[1], a, b, met[0]))
+        for _, a, b, guess in sorted(candidates, key=lambda c: c[0]):
+            if a in taken or b in taken:
+                continue
+            chosen, cameras = [a, b], {lines[a]["camera"], lines[b]["camera"]}
+            for i in sorted(rest, key=lambda i: distance_to_line(guess, lines[i])):
+                if i not in taken and i not in chosen and lines[i]["camera"] not in cameras and distance_to_line(guess, lines[i]) < GATE:
+                    chosen.append(i)
+                    cameras.add(lines[i]["camera"])
+            point = self.triangulate([lines[i] for i in chosen])
+            if point is None:
+                continue
+            number = self.next_number
+            self.next_number += 1
+            self.tracks[number] = {"position": point, "seen": now, "cameras": []}
+            located[number] = point
+            taken.update(chosen)
+            members[number] = chosen
+            for i in chosen:
+                lines[i]["number"] = number
+        for number, point in located.items():
+            self.tracks[number].update(position=point, seen=now,
+                                       cameras=sorted(lines[i]["camera"] for i in members[number]))
         self.tracks = {n: t for n, t in self.tracks.items() if now - t["seen"] <= FORGET_AFTER}
-        self.people = heads
+        self.people = [{"number": n, "position": t["position"], "cameras": t["cameras"]}
+                       for n, t in self.tracks.items() if now - t["seen"] <= LOST_AFTER]
+        return located
+
+    @staticmethod
+    def triangulate(lines):
+        """Head position from the lines of sight of one person, or None (fewer than two usable lines)."""
+        eyes = [line for line in lines if line["kind"] == "eyes"]
+        lines = eyes if len(eyes) >= 2 else lines
+        if len(lines) < 2:
+            return None
+        point = closest_point(lines)
+        if point is None:
+            return None
+        near = [line for line in lines if distance_to_line(point, line) < GATE]
+        if len(near) < 2:
+            return None
+        if len(near) < len(lines):  # a line that does not belong (wrong match): without it
+            point = closest_point(near)
+        if point is None or not HEAD_HEIGHT[0] <= point[2] <= HEAD_HEIGHT[1]:
+            return None
+        return point
 
     def choose_main(self, now):
-        """The main person if visible; else wait for the clicked one (up to KEEP_CHOSEN), else the nearest."""
-        visible = {person["number"]: person for person in self.people}
+        """The main person's number if visible; else wait for the clicked one (up to KEEP_CHOSEN), else the
+        person nearest to the wall."""
+        visible = {n: t for n, t in self.tracks.items() if now - t["seen"] <= LOST_AFTER}
         if self.main in visible:
             self.main_seen = now
-            return visible[self.main]
+            return self.main
         if self.chosen:
             if now - self.main_seen <= KEEP_CHOSEN:
                 return None  # the clicked person is hidden for a moment: send nothing rather than someone else
-            self.log(f"tracking: P{self.main} gone for {KEEP_CHOSEN:.0f} s, following the nearest person")
+            self.log(f"tracking: P{self.main} gone for {KEEP_CHOSEN:.0f} s, following the person nearest to the wall")
             self.chosen = False
         if not visible:
             return None
-        nearest = min(visible.values(), key=lambda person: person["point"][2])
-        self.main, self.main_seen = nearest["number"], now
-        return nearest
+        self.main = max(visible, key=lambda n: visible[n]["position"][0])
+        self.main_seen = now
+        return self.main

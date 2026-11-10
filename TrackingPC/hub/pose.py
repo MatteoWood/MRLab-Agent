@@ -75,7 +75,10 @@ def model_bytes():
 
 
 class PoseModel:
-    def __init__(self, log=print):
+    """device: None to time both and use the faster, or the name of one ("graphics card (DirectML)",
+    "processor"); threads: processor threads (default half of them)."""
+
+    def __init__(self, log=print, device=None, threads=None):
         import onnxruntime as ort
 
         if not MODEL.exists():
@@ -90,8 +93,10 @@ class PoseModel:
             dml = ("DmlExecutionProvider", {"performance_preference": "high_performance"})  # not a built-in chip
             choices.append(("graphics card (DirectML)", options, [dml, "CPUExecutionProvider"]))
         options = ort.SessionOptions()
-        options.intra_op_num_threads = max(4, (os.cpu_count() or 8) // 2)
+        options.intra_op_num_threads = threads or max(4, (os.cpu_count() or 8) // 2)
         choices.append(("processor", options, ["CPUExecutionProvider"]))
+        if device is not None:
+            choices = [choice for choice in choices if choice[0] == device]
         best = None
         for name, options, providers in choices:
             try:
@@ -119,13 +124,16 @@ class PoseModel:
         scale = min(SIZE / w, SIZE / h)
         nw, nh = round(w * scale), round(h * scale)
         dx, dy = (SIZE - nw) // 2, (SIZE - nh) // 2
-        canvas = np.full((SIZE, SIZE, 3), 114, np.uint8)  # letterbox, as the model was trained
-        canvas[dy:dy + nh, dx:dx + nw] = cv2.resize(image, (nw, nh))
-        blob = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)[None].astype(np.float32) / 255.0
-        rows = self.session.run(None, {"images": blob})[0][0].T  # (8400, 56): cx, cy, w, h, score, 17 x (x, y, conf)
-        rows = rows[rows[:, 4] > MIN_SCORE]
-        if len(rows) == 0:
+        if (nw, nh) != (w, h):
+            image = cv2.resize(image, (nw, nh))
+        # letterbox with grey 114, as the model was trained; then RGB, 0..1, channels first, in one step
+        canvas = cv2.copyMakeBorder(image, dy, SIZE - nh - dy, dx, SIZE - nw - dx, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+        blob = cv2.dnn.blobFromImage(canvas, 1 / 255.0, swapRB=True)
+        out = self.session.run(None, {"images": blob})[0][0]  # (56, 8400): cx, cy, w, h, score, 17 x (x, y, conf)
+        keep = np.flatnonzero(out[4] > MIN_SCORE)
+        if keep.size == 0:
             return []
+        rows = out[:, keep].T
         boxes = np.stack([rows[:, 0] - rows[:, 2] / 2, rows[:, 1] - rows[:, 3] / 2, rows[:, 2], rows[:, 3]], 1)
         keep = cv2.dnn.NMSBoxes(boxes.tolist(), rows[:, 4].tolist(), MIN_SCORE, NMS_OVERLAP)
         people = []

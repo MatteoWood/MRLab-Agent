@@ -170,6 +170,12 @@ class FrameStore:
         with self.lock:
             return list(self.history) + [self.latest] if self.latest else []
 
+    def clear(self):
+        """Forget the frames (another camera becomes the frontal camera)."""
+        with self.lock:
+            self.latest = None
+            self.history.clear()
+
 
 class Describer(threading.Thread):
     """Keeps self.view = {"description", "seq", "made", "model_ms"} up to date while running.

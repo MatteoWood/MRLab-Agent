@@ -1,4 +1,4 @@
-"""3D view of the lab (hub page "3D view"): floor grid, the LED wall and every tracked person, live.
+"""3D view of the lab (hub page "3D view"): floor grid, the LED wall, the calibrated cameras and every tracked person, live.
 
 Tracking space as NDC_Basic uses it (cm; X towards the wall, Y to the right seen facing the wall, Z up).
 The wall comes from led_wall.json (tools/led_wall_from_fbx.py). Each person is a glowing point at their
@@ -32,6 +32,8 @@ TRAIL_SECONDS = 2.5
 BACKGROUND = QColor(5, 7, 11)
 WALL_COLOUR = QColor(150, 200, 240)   # pale ice blue
 GRID_COLOUR = QColor(110, 140, 180)
+CAMERA_COLOUR = QColor(200, 205, 215)  # calibrated cameras: a dot and a line where they look
+CAMERA_LINE = 45.0                     # cm
 GRID_FADE = 420.0  # cm from the middle of the floor where the grid has faded out
 BLOOM = 0.45       # strength of the glow added to the grid and the wall
 PEOPLE_COLOURS = [QColor(240, 130, 170), QColor(240, 180, 110), QColor(150, 210, 150), QColor(230, 215, 130),
@@ -69,10 +71,11 @@ def faded(colour, alpha):
 
 
 class Space(QWidget):
-    def __init__(self, people):
-        """people: function returning [(number, is_main, position as array (x, y, z) in cm)]."""
+    def __init__(self, people, cameras):
+        """people: function returning [(number, is_main, position as array (x, y, z) in cm)];
+        cameras: function returning [(number, position, looking direction)] of the calibrated cameras."""
         super().__init__()
-        self.people = people
+        self.people, self.cameras = people, cameras
         self.yaw, self.pitch = -35.0, 10.0  # degrees: seen from behind the visitors, to the left, about 3 m up
         self.drag = None
         self.cache, self.cache_key = None, None  # grid and wall with their glow, for the current view
@@ -209,6 +212,14 @@ class Space(QWidget):
                 del self.trails[number]
 
         painter.setFont(QFont("Segoe UI", 8))
+        for number, position, direction in self.cameras():  # where the calibration put the cameras
+            ends = np.array([[*position, *(position + CAMERA_LINE * direction)]])
+            self.line(painter, self.segments(ends, view), CAMERA_COLOUR, 1.0, 0.7)
+            (pixel,), (depth,) = self.to_screen(np.asarray(position, float)[None], view)
+            if depth > NEAR:
+                self.light(painter, QPointF(*pixel), max(2.0, view[4] * 3.0 / depth), CAMERA_COLOUR)
+                painter.setPen(faded(CAMERA_COLOUR, 0.8))
+                painter.drawText(QPointF(pixel[0] + 7, pixel[1] - 5), str(number))
         for number, main, position in people:
             colour = PEOPLE_COLOURS[(number - 1) % len(PEOPLE_COLOURS)]
             trail = self.trails[number]
