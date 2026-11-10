@@ -25,6 +25,7 @@ import collections
 import itertools
 import json
 import math
+import pathlib
 import socket
 import threading
 import time
@@ -54,7 +55,18 @@ FALLBACK_SHARE = 0.35     # without both eyes the measured head moves the positi
 MAX_SPEED = 300.0         # cm/s: a measurement further from the expected spot than this allows (plus
 JUMP_SLACK = 15.0         # cm) is held back,
 HOLD_BACK = 5             # at most this many times in a row
+WALL_CLEARANCE = 25.0     # cm: a new person must be this far in front of the LED wall (Frank on the wall is no visitor)
 SUBJECT = "Actor0"
+
+
+def wall_edge():
+    """(Y, X) of the LED wall's bottom edge in tracking space, sorted by Y (hub/led_wall.json)."""
+    outline = json.loads(pathlib.Path(__file__).with_name("led_wall.json").read_text())["outline"]
+    points = sorted({(round(y, 1), round(x, 1)) for line in outline for x, y, z in (line[:3], line[3:]) if abs(z) < 1})
+    return np.array([y for y, _ in points]), np.array([x for _, x in points])
+
+
+WALL_EDGE_Y, WALL_EDGE_X = wall_edge()
 
 # Moverse rig (from /Game/Actor0/asset): name, parent index, location relative to the parent.
 # Rig axes: X to the person's left, Y down, Z forward. Bone rotations are identity in this pose.
@@ -480,6 +492,11 @@ class Tracker(threading.Thread):
         return (head, eyes) if HEAD_HEIGHT[0] <= head[2] <= HEAD_HEIGHT[1] else None
 
     def inside(self, point):
+        """Where a new person can be: inside the area the cameras surround (else a reflection or an object) and
+        not on or behind the LED wall (the side cameras see Frank on it as a person)."""
+        if WALL_EDGE_Y[0] - AREA_MARGIN <= point[1] <= WALL_EDGE_Y[-1] + AREA_MARGIN and \
+                point[0] > np.interp(point[1], WALL_EDGE_Y, WALL_EDGE_X) - WALL_CLEARANCE:
+            return False
         return self.area is None or \
             cv2.pointPolygonTest(self.area, (float(point[0]), float(point[1])), True) >= -AREA_MARGIN
 

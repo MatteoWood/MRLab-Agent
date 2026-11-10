@@ -7,6 +7,7 @@ to Unreal). Settings and the calibration are saved in hub.local.json next to MRL
 Run from the folder: runtime\\python\\pythonw.exe -m hub [--webcam]   (--webcam: laptop testing)
 """
 import collections
+import ctypes
 import json
 import pathlib
 import sys
@@ -16,7 +17,7 @@ import time
 import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton,
                                QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
@@ -971,7 +972,11 @@ class Hub(QMainWindow):
 
 
 def main():
+    # The hub runs in Python's pythonw.exe: an app id of its own makes the taskbar show the hub's icon
+    # (hub/icon.png) instead of Python's. Only for this process, nothing on the PC is changed.
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MRLab.Hub")
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(str(pathlib.Path(__file__).with_name("icon.png"))))
     app.setStyleSheet(STYLE)
     window = Hub(webcam="--webcam" in sys.argv)
     window.show()

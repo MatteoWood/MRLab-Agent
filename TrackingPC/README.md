@@ -66,7 +66,8 @@ The hub numbers them in this order from their network addresses, listed as `came
    - **Tracking**: the Unreal PC's address and the Moverse port come from `runtime\defaults.json` (the values
      Moverse uses). Press **Start tracking**: the hub times the pose model (YOLO11 nano pose) on the graphics
      card and the processor and starts the faster in every camera's helper; each tile then shows its ms per
-     picture. A head needs two cameras: the hub finds where their lines of sight to the eyes meet; a new person counts once three cameras see them at the same moment. Pick a
+     picture. A head needs two cameras: the hub finds where their lines of sight to the eyes meet; a new person counts once three cameras see them at the same moment, and not on or behind the LED wall
+     (some cameras see Frank on it as a person). Pick a
      camera above the picture to see its view: each person has a number (P1, P2, ...), the same in every
      camera. Only the main person (blue box, "MAIN") is sent; **click a person** to choose them. Without a
      click it is the person nearest to the wall; if the clicked person is gone for 2 s, the nearest again.
@@ -105,7 +106,7 @@ The hub sends the same packets as Moverse (same format, same port), so check, in
 ## Files
 | File | What it does |
 |---|---|
-| `MRLabHub.exe` | Starts the hub (`launcher\MRLabHub.cs`, built by `launcher\build.bat` with the C# compiler that is part of Windows) |
+| `MRLabHub.exe` | Starts the hub (`launcher\MRLabHub.cs`, built by `launcher\build.bat` with the C# compiler that is part of Windows; icon `launcher\MRLabHub.ico`, the window's copy `hub\icon.png`) |
 | `hub\app.py` | The window: Cameras, Calibration, Tracking, 3D view, Vision |
 | `hub\cameras.py` | Search, connect, stream: one helper program per camera (full picture as JPEG at 60 fps; the pose model runs in the helper, on this PC); no model runs on the cameras |
 | `hub\pose.py` | YOLO11 nano pose on this PC (ONNX Runtime; graphics card or processor, whichever is faster) |
