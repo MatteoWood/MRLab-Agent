@@ -22,13 +22,16 @@ WEBCAM = "webcam"  # device id of the test webcam
 # One camera opens at a time: 8 threads opening their cameras at once crashed DepthAI (heap corruption,
 # lab 2026-11-10). The others wait ("waiting"); streaming runs in parallel.
 OPEN_LOCK = threading.Lock()
+# A closed PoE camera restarts and cannot be opened again for some seconds (Luxonis forum: about 10 s).
+REOPEN_WAIT = 20.0
 
 
 class Camera:
     """One camera as shown in the window."""
 
-    def __init__(self, device_id, address, state):
+    def __init__(self, device_id, address, state, info=None):
         self.device_id, self.address, self.state = device_id, address, state
+        self.info = info  # DepthAI's DeviceInfo from the search (None for the webcam)
         self.status = "found" if state != "in use" else "in use by another program"
         self.preview = None  # small BGR image
         self.fps = 0.0
@@ -44,7 +47,7 @@ def search(include_webcam=False):
 
         for info in dai.Device.getAllConnectedDevices():
             in_use = info.state in (dai.XLinkDeviceState.X_LINK_BOOTED, dai.XLinkDeviceState.X_LINK_BOOTED_NON_EXCLUSIVE)
-            cameras.append(Camera(info.deviceId or info.name, info.name, "in use" if in_use else "available"))
+            cameras.append(Camera(info.deviceId or info.name, info.name, "in use" if in_use else "available", info))
     except Exception as failure:  # DepthAI missing or the network search failed: shown in the log
         error = str(failure)
     if include_webcam:
@@ -94,7 +97,9 @@ class CameraWorker(threading.Thread):
             if not self.running:  # disconnected while waiting
                 return
             cam.status = "connecting"
-            pipeline = dai.Pipeline(dai.Device(dai.DeviceInfo(cam.address)))
+            start = time.monotonic()
+            pipeline = dai.Pipeline(self.open_device(dai))
+            opened = time.monotonic()
             device = pipeline.getDefaultDevice()
             cam.product = device.getProductName()
             color = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
@@ -111,6 +116,7 @@ class CameraWorker(threading.Thread):
             else:
                 color_queue = color.requestOutput(PREVIEW, dai.ImgFrame.Type.NV12, fps=PREVIEW_FPS).createOutputQueue(maxSize=1, blocking=False)
             pipeline.start()
+            started = time.monotonic()
         with pipeline:
             times, depth = [], None
             while self.running and pipeline.isRunning():
@@ -122,8 +128,26 @@ class CameraWorker(threading.Thread):
                 if frame is None:
                     time.sleep(0.002)
                     continue
+                if not times:  # first picture: how long each part of connecting took
+                    self.log(f"camera {cam.device_id}: opened in {opened - start:.1f} s, pipeline started in "
+                             f"{started - opened:.1f} s, first picture after {time.monotonic() - start:.1f} s")
                 age = (dai.Clock.now() - frame.getTimestamp()).total_seconds()
                 self.deliver(frame.getCvFrame(), time.monotonic() - age, depth, times)
+
+    def open_device(self, dai):
+        """Open the camera with the details from the search; a camera that was just closed restarts first,
+        so retry for up to REOPEN_WAIT seconds."""
+        cam = self.camera
+        deadline = time.monotonic() + REOPEN_WAIT
+        while True:
+            try:
+                return dai.Device(cam.info or dai.DeviceInfo(cam.address))
+            except RuntimeError as error:
+                if not self.running or time.monotonic() > deadline:
+                    raise
+                cam.status = "camera restarting, retrying"
+                self.log(f"camera {cam.device_id}: not ready ({error}), retrying")
+                time.sleep(1.0)
 
     def run_webcam(self):
         capture = cv2.VideoCapture(0, cv2.CAP_DSHOW)

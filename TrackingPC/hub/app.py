@@ -474,7 +474,9 @@ class Hub(QMainWindow):
     # ---------- actions ----------
 
     def log(self, text):
-        self.log_lines.append(f"{time.strftime('%H:%M:%S')} {text}")
+        line = f"{time.strftime('%H:%M:%S')} {text}"
+        self.log_lines.append(line)
+        print(line, flush=True)  # also in the console when started from one (MRLabHub.exe has none)
 
     def change(self, key, value):
         if self.settings.get(key) == value:
