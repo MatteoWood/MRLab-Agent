@@ -29,8 +29,8 @@ To build `runtime\` again (on a PC with internet): `2_setup.bat` downloads every
    any free port, not the Moverse port). Start Play or nDisplay Launch.
 4. Double-click `MRLabHub.exe`.
    - **Cameras**: the hub searches at start (Search to repeat). Each tile shows ID, address and state
-     ("found", "in use by another program" = Moverse still running). Press **Connect**: the pictures
-     appear. On the camera on top of the wall press **Use as frontal** (blue frame).
+     ("found", "in use by another program" = Moverse still running). Press **Connect**: the cameras open
+     one after another ("waiting", "connecting", then the picture), a few seconds each. On the camera on top of the wall press **Use as frontal** (blue frame).
    - **Vision**: enter the Unreal PC's address and the port from step 3, press **Start vision**. The first
      start in a new folder loads the model for a few minutes ("loading the model"). Then "What Frank sees"
      shows the description; the Unreal log shows "Camera service: first view from ...". Talk to Frank.

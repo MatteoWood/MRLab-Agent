@@ -19,6 +19,9 @@ FRONTAL_SIZE = (960, 540)  # the pose model works at 640 px across; 30 fps of th
 FRONTAL_FPS = 30
 DEPTH_SIZE = (640, 360)    # same aspect as the colour frame
 WEBCAM = "webcam"  # device id of the test webcam
+# One camera opens at a time: 8 threads opening their cameras at once crashed DepthAI (heap corruption,
+# lab 2026-11-10). The others wait ("waiting"); streaming runs in parallel.
+OPEN_LOCK = threading.Lock()
 
 
 class Camera:
@@ -86,7 +89,12 @@ class CameraWorker(threading.Thread):
         import depthai as dai
 
         cam, frontal = self.camera, self.frontal is not None
-        with dai.Pipeline(dai.Device(dai.DeviceInfo(cam.address))) as pipeline:
+        cam.status = "waiting"
+        with OPEN_LOCK:
+            if not self.running:  # disconnected while waiting
+                return
+            cam.status = "connecting"
+            pipeline = dai.Pipeline(dai.Device(dai.DeviceInfo(cam.address)))
             device = pipeline.getDefaultDevice()
             cam.product = device.getProductName()
             color = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
@@ -103,6 +111,7 @@ class CameraWorker(threading.Thread):
             else:
                 color_queue = color.requestOutput(PREVIEW, dai.ImgFrame.Type.NV12, fps=PREVIEW_FPS).createOutputQueue(maxSize=1, blocking=False)
             pipeline.start()
+        with pipeline:
             times, depth = [], None
             while self.running and pipeline.isRunning():
                 if depth_queue is not None:
