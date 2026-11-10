@@ -17,8 +17,8 @@ lens distortion comes from the camera itself (factory calibration).
    where the cameras saw them (in turns: each board with the cameras fixed, each camera with the boards
    fixed). Views that fit badly are dropped.
 4. Score (0 to 100): per camera from how far, in pixels, the corners land from where the camera saw them
-   (0.3 px or less: full marks, 2 px or more: none), how many views it had, and whether its height comes
-   out as the cameras' known height; the total is the mean over all cameras.
+   (0.3 px or less: full marks, 2 px or more: none), how many views it had, and, for cameras with a measured
+   height (KNOWN_HEIGHTS), whether its height comes out as measured; the total is the mean over all cameras.
 """
 import collections
 import threading
@@ -34,7 +34,7 @@ SQUARE = 6.5       # cm
 # x along the long side (to the right), y along the short side (down), z into the board.
 BOARD_POINTS = np.array([[i * SQUARE, j * SQUARE, 0.0] for j in range(BOARD[1]) for i in range(BOARD[0])])
 WALL_X, WALL_Y = 309.0, 16.0  # middle of the LED wall at the floor, tracking space (README 4.3)
-CAMERA_HEIGHT = 305.0          # all cameras are at ceiling height (owner, 2026-11-10)
+KNOWN_HEIGHTS = {1: 314.0}     # cm, measured by the owner (2026-11-10); the cameras do not all hang at one height
 FRONT_CAMERAS = (1, 2, 6)      # cameras at the wall: they tell on which side of the floor board the wall is
 SHOT_INTERVAL = 0.25           # s between moments taken
 SAME_MOMENT = 0.002            # s: a picture this close to a moment is used as it is, else two are interpolated
@@ -357,22 +357,24 @@ def solve(walk, floor, cameras, distance):
     board = mean_pose(on_floor)
     floor_cameras = sorted({n for shot in floor for n in shot if n in poses})
 
-    # Tracking space. Up: square to the plane through the cameras, as they all hang at the same height; over
-    # metres between them this is surer than the floor board, which one far camera may see alone (in the
-    # simulation a 1 degree tilt of the board moved far cameras by 13 cm). With fewer than three cameras
-    # spread out, the board's own up. Floor height, the wall's direction (the board's short side, towards
-    # the cameras at the wall) and position come from the floor board; Y = right seen facing the wall.
+    # Tracking space from the floor board: up (square to the board), floor height, the wall's direction (the
+    # board's short side, towards the cameras at the wall) and position; Y = right seen facing the wall.
+    # When only one camera saw the floor board, up is taken square to the plane through the cameras instead
+    # (one far camera's view can be 1 degree off: 13 cm at far cameras in a simulation); that plane is only
+    # level if the cameras hang at one height, which in the lab they do not (2026-11-10).
     centres = {n: inverse(p)[:3, 3] for n, p in poses.items()}
     centre = board[:3, :3] @ BOARD_POINTS.mean(0) + board[:3, 3]
     normal = board[:3, :3][:, 2]
     board_up = -normal if np.mean([(c - centre) @ -normal for c in centres.values()]) > 0 else normal
-    up, tilt = board_up, None
+    up, tilt, from_board = board_up, None, len(floor_cameras) >= 2
     if len(centres) >= 3:
         spread = np.array(list(centres.values())) - np.mean(list(centres.values()), axis=0)
         _, sizes, axes = np.linalg.svd(spread)
         if sizes[1] > 100.0 * np.sqrt(len(centres)):  # the cameras span a plane (not one line)
-            up = axes[2] if axes[2] @ board_up > 0 else -axes[2]
-            tilt = float(np.degrees(np.arccos(np.clip(up @ board_up, -1, 1))))
+            plane_up = axes[2] if axes[2] @ board_up > 0 else -axes[2]
+            tilt = float(np.degrees(np.arccos(np.clip(plane_up @ board_up, -1, 1))))
+            if not from_board:
+                up = plane_up
     front = [n for n in FRONT_CAMERAS if n in centres] or list(centres)
     short = board[:3, :3][:, 1]
     x_axis = short if short @ (np.mean([centres[n] for n in front], axis=0) - centre) > 0 else -short
@@ -392,7 +394,7 @@ def solve(walk, floor, cameras, distance):
                        for b, shot in zip(boards, used) if n in shot]
         count_views = len(view_errors)
         error = float(np.sqrt(np.mean(np.concatenate(view_errors) ** 2))) if view_errors else float("inf")
-        height_off = abs(position[2] - CAMERA_HEIGHT)
+        height_off = abs(position[2] - KNOWN_HEIGHTS[n]) if n in KNOWN_HEIGHTS else 0.0
         score = (100 * np.clip((2.0 - error) / 1.7, 0, 1) * min(1.0, count_views / GOOD_VIEWS)
                  * (1.0 if height_off <= 10 else 0.5 if height_off <= 25 else 0.0))
         result[device_id] = {
@@ -401,18 +403,18 @@ def solve(walk, floor, cameras, distance):
             "matrix": [list(map(float, row)) for row in lenses[n]["matrix"]],  # the lens the tracker must use
         }
         report.append(f"Camera {n}: score {score:.0f}  |  {error:.2f} px  |  {count_views} views  |  at X {position[0]:.0f}, "
-                      f"Y {position[1]:.0f}, height {position[2]:.0f} cm (known {CAMERA_HEIGHT:.0f})  |  {lens_notes[n]}")
+                      f"Y {position[1]:.0f}, height {position[2]:.0f} cm" + (f" (measured {KNOWN_HEIGHTS[n]:.0f})" if n in KNOWN_HEIGHTS else "")
+                      + f"  |  {lens_notes[n]}")
     if 2 in poses and 6 in poses:
         gap = np.linalg.norm(centres[2] - centres[6]) / 100
         report.append(f"Check with a tape: cameras 2 and 6 (top left and right of the wall) are {gap:.2f} m apart.")
     total = float(np.mean([result[cameras[n][0]]["score"] if cameras[n][0] in result else 0 for n in cameras]))
     report.insert(0, f"Score {total:.0f} of 100  |  {len(used)} moments with 2+ cameras  |  floor board seen by camera(s) "
                      + ", ".join(str(n) for n in floor_cameras))
-    if tilt is None:
-        report.append("Up: from the floor board (fewer than three cameras spread out).")
+    if from_board or tilt is None:
+        report.append("Up: square to the floor board" + (f"; the plane through the cameras lies {tilt:.1f} deg from it." if tilt is not None else "."))
     else:
-        report.append(f"Up: square to the plane through the cameras; the floor board lies {tilt:.1f} deg from it"
-                      + (" (more than 2 deg: check the board lies flat and the cameras hang at one height)." if tilt > 2 else "."))
+        report.append(f"Up: square to the plane through the cameras (only one camera saw the floor board); the board lies {tilt:.1f} deg from it.")
     if missing:
         report.append("Not linked: camera(s) " + ", ".join(str(n) for n in missing) + ". Walk with the board where they "
                       "and a neighbouring camera both see it.")

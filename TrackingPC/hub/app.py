@@ -904,6 +904,7 @@ class Hub(QMainWindow):
                 seen = f"{len(people)} seen, waiting for P{tracker.main} (clicked) to be visible again"
             else:
                 seen = f"{len(people)} seen" if people else "nobody found (a person needs two cameras)"
+            seen += f"  |  {tracker.combined} cameras combined in the last update, {tracker.pending} not confirmed yet"
             self.track_info.setText(f"{seen}  |  {tracker.status}  |  {tracker.sent} packets sent to "
                                     f"{self.settings['unreal_address']}:{self.settings['moverse_port']}")
         else:

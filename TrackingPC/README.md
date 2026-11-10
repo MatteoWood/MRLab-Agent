@@ -66,7 +66,7 @@ The hub numbers them in this order from their network addresses, listed as `came
    - **Tracking**: the Unreal PC's address and the Moverse port come from `runtime\defaults.json` (the values
      Moverse uses). Press **Start tracking**: the hub times the pose model (YOLO11 nano pose) on the graphics
      card and the processor and starts the faster in every camera's helper; each tile then shows its ms per
-     picture. A head needs two cameras: the hub finds where their lines of sight to the eyes meet; a new person counts once three cameras see them at the same moment, and not on or behind the LED wall
+     picture. A head needs two cameras: the hub finds where their lines of sight to the eyes meet; a new person counts once three different cameras have seen them, and not on or behind the LED wall
      (some cameras see Frank on it as a person). Pick a
      camera above the picture to see its view: each person has a number (P1, P2, ...), the same in every
      camera. Only the main person (blue box, "MAIN") is sent; **click a person** to choose them. Without a

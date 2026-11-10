@@ -7,15 +7,16 @@ lens and its position (the hub's calibration, hub/calibration.py).
 - People across cameras: a known person takes, from each camera, the person whose head line (through the
   middle of their visible face points) passes nearest to where they are expected (within MATCH). The rest
   are paired where two cameras' head lines nearly cross (within NEW_GATE) at a head height. A new person
-  counts only after CONFIRM updates in a row (single wrong matches made extra "people" in the lab), and a
-  new person within MERGE of a known one is that person.
+  counts only after CONFIRM updates, seen by NEW_CAMERAS different cameras, inside the area the cameras
+  surround and not on the LED wall (single wrong matches, a reflection and Frank on the wall made extra
+  "people" in the lab), and a new person within MERGE of a known one is that person.
 - Head position: each face point is triangulated on its own (the point nearest to its lines, weighted by
   the point's confidence and 1 / distance squared; a line further than GATE is dropped), so all cameras
   aim at the same physical spot. The head is the middle of the two eyes. Without both eyes, the other
   triangulated points stand in, shifted by their distance from the eyes learned while both were seen, so
   the position does not jump when the visible points change. No depth is used: a person needs two cameras.
-- Timing: pictures are combined only when taken within SAME_TIME of the newest one, and each line is moved
-  along the person's velocity to that moment.
+- Timing: pictures are combined when taken within the slowest camera's interval between analysed pictures
+  (SAME_TIME limits) of the newest one, and each line is moved along the person's velocity to that moment.
 - The main person (clicked in the window, else the one nearest to the wall) is smoothed with a One Euro
   filter and sent to the Unreal PC in Moverse's packet format (subject Actor0, 25 moverserig bones, head
   at the point) at every update, so the Moverse Live Link plugin, NDC_Basic and the gaze work unchanged.
@@ -29,6 +30,7 @@ import pathlib
 import socket
 import threading
 import time
+import traceback
 
 import cv2
 import numpy as np
@@ -37,7 +39,10 @@ from hub import calibration, pose
 
 MIN_POINT_CONFIDENCE = 0.5
 FACE = (pose.NOSE, pose.LEFT_EYE, pose.RIGHT_EYE, pose.LEFT_EAR, pose.RIGHT_EAR)
-SAME_TIME = 0.025         # s: pictures combined only when taken this close to the newest one
+SAME_TIME = (0.03, 0.15)  # s: pictures are combined when taken this close to the newest one: the slowest
+                          # camera's interval between analysed pictures, within these limits. Live, each helper
+                          # analyses its newest picture as fast as it can (about 22 a second each on the laptop),
+                          # and the helpers need not be equally fast
 GATE = 12.0               # cm: the lines of one face point pass at most this far from it
 MATCH = 35.0              # cm: a known person's head line passes at most this far from where they are expected
 NEW_GATE = 20.0           # cm: two cameras' head lines of a new person pass at most this far apart
@@ -50,7 +55,7 @@ FORGET_AFTER = 2.0        # s a person may be unseen and keep their number
 KEEP_CHOSEN = 2.0         # s the clicked main person may be unseen before the nearest is followed again
 OFFSET_SMOOTHING = 0.05   # share of a new measurement in a face point's learned distance from the eyes
 AREA_MARGIN = 30.0        # cm: people further outside the area the cameras surround are ignored (reflections)
-NEW_CAMERAS = 3           # cameras that must see a new person at the same moment before they count
+NEW_CAMERAS = 3           # different cameras that must have seen a new person before they count
 FALLBACK_SHARE = 0.35     # without both eyes the measured head moves the position only this share of the way
 MAX_SPEED = 300.0         # cm/s: a measurement further from the expected spot than this allows (plus
 JUMP_SLACK = 15.0         # cm) is held back,
@@ -234,6 +239,7 @@ class Tracker(threading.Thread):
         self.wake = threading.Condition()
         self.views = {}        # device id -> (capture time, [people seen]), newest picture per camera
         self.version = 0       # counts the pictures that came in
+        self.intervals = {}    # device id -> smoothed time between its analysed pictures
         self.used = -1         # version of the last update
         self.tracks = {}       # number -> person (also not confirmed ones, and unseen for up to FORGET_AFTER)
         self.next_number = 1
@@ -247,6 +253,8 @@ class Tracker(threading.Thread):
         self.chosen = False    # main person chosen by a click (else: automatic, nearest to the wall)
         self.position = None   # filtered head position of the main person (cm)
         self.rate = 0.0        # updates of the main person per second
+        self.combined = 0      # cameras that saw a person in the pictures of the last update
+        self.pending = 0       # people found but not confirmed yet
         self.sent = 0
         for camera in self.cameras:
             camera.on_people = self.on_people
@@ -282,6 +290,10 @@ class Tracker(threading.Thread):
                              "box": (box[0] / w, box[1] / h, box[2] / w, box[3] / h), "head": (head[0] / w, head[1] / h),
                              "number": None})
         with self.wake:
+            previous = self.views.get(camera.device_id)
+            if previous is not None and 0 < captured - previous[0] < 1.0:
+                last = self.intervals.get(camera.device_id, captured - previous[0])
+                self.intervals[camera.device_id] = 0.8 * last + 0.2 * (captured - previous[0])
             self.views[camera.device_id] = (captured, seen)
             self.version += 1
             self.wake.notify()
@@ -337,6 +349,7 @@ class Tracker(threading.Thread):
         address = (self.settings["unreal_address"], int(self.settings["moverse_port"]))
         offset, subject = head_offset(), subject_packet()
         last_update = last_subject = 0.0
+        last_error = None
         while self.running:
             with self.wake:
                 self.wake.wait(0.1)
@@ -344,7 +357,15 @@ class Tracker(threading.Thread):
             if wait > 0:
                 time.sleep(wait)
             now = last_update = time.perf_counter()
-            if not self.update(now):
+            try:
+                changed = self.update(now)
+            except Exception:  # an error must not stop the tracking silently: log it (once) and go on
+                error = traceback.format_exc()
+                if error != last_error:
+                    self.log(f"tracking: error in combining, still running:\n{error}")
+                    last_error = error
+                continue
+            if not changed:
                 continue
             try:
                 if now - last_subject > 1.0:  # sent every second, so Unreal can start at any time
@@ -366,9 +387,14 @@ class Tracker(threading.Thread):
                 return False
             self.used = self.version
             views = list(self.views.values())
+            window = min(SAME_TIME[1], max(SAME_TIME[0], 1.1 * max(self.intervals.values(), default=0.0)))
+        if not views:  # no camera has delivered yet (this stopped the tracker in the lab, 2026-11-10)
+            return False
         newest = max(captured for captured, _ in views)
-        seen = [person for captured, people in views if newest - captured <= SAME_TIME for person in people]
+        seen = [person for captured, people in views if newest - captured <= window for person in people]
         updated = self.locate(seen, newest, now)
+        self.combined = len({person["camera"] for person in seen})
+        self.pending = sum(not track["confirmed"] for track in self.tracks.values())
         main = self.choose_main(now)
         if main is None or main not in updated:
             if now - self.last_seen > LOST_AFTER:
@@ -429,7 +455,7 @@ class Tracker(threading.Thread):
                     chosen.append(i)
                     cameras.add(seen[i]["camera"])
             track = {"position": guess, "velocity": np.zeros(3), "time": 0.0, "seen": now, "cameras": [],
-                     "offsets": {}, "path": collections.deque(), "hits": 0, "most": 0, "held": 0, "confirmed": False}
+                     "offsets": {}, "path": collections.deque(), "hits": 0, "seen_by": set(), "held": 0, "confirmed": False}
             found = self.head(track, [seen[i] for i in chosen], t)
             if found is None:
                 continue
@@ -522,8 +548,8 @@ class Tracker(threading.Thread):
             track["velocity"] = velocity * min(1.0, 300.0 / speed) if speed > 0 else velocity
         track.update(position=head, time=t, seen=now, cameras=sorted(cameras))
         track["hits"] += 1
-        track["most"] = max(track["most"], len(cameras))
-        if track["hits"] >= CONFIRM and track["most"] >= NEW_CAMERAS:
+        track["seen_by"].update(cameras)
+        if track["hits"] >= CONFIRM and len(track["seen_by"]) >= NEW_CAMERAS:
             track["confirmed"] = True
         return True
 
