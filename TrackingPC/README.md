@@ -22,6 +22,23 @@ To build `runtime\` again (on a PC with internet): `2_setup.bat` downloads every
 - To remove everything: close the hub and delete this folder.
 - Windows itself still notes that programs ran (for example its Prefetch folder); outside our control.
 
+## The 8 cameras
+All at ceiling height (305 cm). Left and right as seen standing in front of the wall, facing it (owner, 2026-11-10).
+
+| Camera | Where |
+|---|---|
+| 1 | front (frontal camera for Frank's view by default) |
+| 2 | top left of the LED wall |
+| 3 | left side of the area in front of the wall, near the wall |
+| 4 | left side of the area in front of the wall |
+| 5 | back of the area, on the ceiling |
+| 6 | top right of the LED wall |
+| 7 | right side of the area in front of the wall, near the wall |
+| 8 | right side of the area in front of the wall |
+
+The hub numbers them in this order from their network addresses, listed as `camera_order` in
+`runtime\defaults.json` (not in Git: the repository is public).
+
 ## Procedure in the lab
 1. Copy this whole folder (with `runtime\`) from the USB stick to the tracking PC, for example to the desktop.
 2. Close Moverse (it holds the cameras and the graphics card).

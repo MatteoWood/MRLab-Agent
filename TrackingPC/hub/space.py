@@ -23,7 +23,7 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QRadialGradient
 from PySide6.QtWidgets import QWidget
 
 WALL = json.loads(pathlib.Path(__file__).with_name("led_wall.json").read_text())
-TARGET = np.array([150.0, 16.0, 100.0])  # the view turns around this point: in front of the wall, low
+TARGET = np.array([150.0, 16.0, 120.0])  # the view turns around this point: in front of the wall, low
 DISTANCE = 950.0                          # cm from the camera to TARGET
 FOV = 50.0                                # degrees, vertically
 NEAR = 10.0
@@ -73,7 +73,7 @@ class Space(QWidget):
         """people: function returning [(number, is_main, position as array (x, y, z) in cm)]."""
         super().__init__()
         self.people = people
-        self.yaw, self.pitch = -35.0, 22.0  # degrees: seen from behind the visitors, to the left, a bit above
+        self.yaw, self.pitch = -35.0, 10.0  # degrees: seen from behind the visitors, to the left, about 3 m up
         self.drag = None
         self.cache, self.cache_key = None, None  # grid and wall with their glow, for the current view
         self.trails = collections.defaultdict(collections.deque)  # number -> (time, position)

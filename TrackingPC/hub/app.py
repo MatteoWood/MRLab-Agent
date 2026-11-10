@@ -504,6 +504,12 @@ class Hub(QMainWindow):
             found, error = cameras.search(include_webcam=self.webcam)
             if error:
                 self.log(f"camera search failed: {error}")
+            # Camera 1 to 8 in the order of the lab's camera addresses (runtime\defaults.json, not in Git);
+            # cameras not in that list after them. Camera 1 is the frontal camera unless another was chosen.
+            order = self.settings.get("camera_order", [])
+            found.sort(key=lambda c: (order.index(c.address) if c.address in order else len(order), c.address))
+            if not self.settings["frontal_id"] and order and found and found[0].address == order[0]:
+                self.settings["frontal_id"] = found[0].device_id
             self.cameras = found[:8]
             self.searching = False
             self.log(f"found {len(found)} camera(s)")
