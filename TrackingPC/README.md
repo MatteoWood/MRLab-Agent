@@ -23,7 +23,7 @@ To build `runtime\` again (on a PC with internet): `2_setup.bat` downloads every
 - Windows itself still notes that programs ran (for example its Prefetch folder); outside our control.
 
 ## The 8 cameras
-OAK-D-W-PoE cameras (IMX378 colour sensor; the hub uses 1280x960 at 60 fps), all at ceiling height (about 305 cm). Left and right as seen standing in front of the wall, facing it (owner, 2026-11-10).
+OAK-D-W-PoE cameras (IMX378 colour sensor; the hub uses 1280x960 at 60 fps), at ceiling height: 304 to 317 cm in the calibration from the owner's recording (camera 1 measured with a tape: 314 cm). Left and right as seen standing in front of the wall, facing it (owner, 2026-11-10).
 
 | Camera | Where |
 |---|---|
@@ -61,8 +61,8 @@ The hub numbers them in this order from their network addresses, listed as `came
         black and white pattern (not the white border), enter it, step away, press **Take the floor board**.
         One camera finding it is enough. If none does, move it a little and measure again.
      3. **Compute** (up to two minutes), read the score and the line per camera (pixel error, views, position,
-        height against 305 cm, measured focal length), check the distance between cameras 2 and 6 with a tape,
-        then **Use this calibration**. It is saved in `hub.local.json`.
+        height (camera 1 against the measured 314 cm), focal length measured with all cameras together), check
+        the distance between cameras 2 and 6 with a tape, then **Use this calibration**. It is saved in `hub.local.json`.
    - **Tracking**: the Unreal PC's address and the Moverse port come from `runtime\defaults.json` (the values
      Moverse uses). Press **Start tracking**: the hub times the pose model (YOLO11 nano pose) on the graphics
      card and the processor and starts the faster in every camera's helper; each tile then shows its ms per
@@ -71,8 +71,9 @@ The hub numbers them in this order from their network addresses, listed as `came
      camera above the picture to see its view: each person has a number (P1, P2, ...), the same in every
      camera. Only the main person (blue box, "MAIN") is sent; **click a person** to choose them. Without a
      click it is the person nearest to the wall; if the clicked person is gone for 2 s, the nearest again.
-     X/Y/Z show the head position, Rate the updates per second, the line below which cameras see the main
-     person. `NDC_Basic` on the Unreal PC moves the view as with Moverse. Moverse must not run at the same time.
+     X/Y/Z show the head position that is sent, Rate the updates per second, State whether the main person
+     stands (the sent head stays exactly where it is, so the wall's view is still) or moves (it follows at once,
+     smoothed sideways to the direction of movement); the line below which cameras see the main person. `NDC_Basic` on the Unreal PC moves the view as with Moverse. Moverse must not run at the same time.
      With tracking on, "What Frank sees" (Vision page) starts with "Main visitor" when Camera 1 sees them.
    - **3D view**: the lab with the LED wall, the floor, the calibrated cameras (dot and a short line where they
      look) and every tracked person live (own colour, the main person bigger, a fading trail, a line down to a
@@ -111,7 +112,7 @@ The hub sends the same packets as Moverse (same format, same port), so check, in
 | `hub\cameras.py` | Search, connect, stream: one helper program per camera (full picture as JPEG at 60 fps; the pose model runs in the helper, on this PC); no model runs on the cameras |
 | `hub\pose.py` | YOLO11 nano pose on this PC (ONNX Runtime; graphics card or processor, whichever is faster) |
 | `hub\calibration.py` | Camera positions from the checkerboard: board finder, collecting moments, solving, score |
-| `hub\tracking.py` | Head tracker: lines of sight from all calibrated cameras, people across cameras, smoothing, Moverse packets |
+| `hub\tracking.py` | Head tracker: lines of sight from all calibrated cameras, people across cameras, what is sent (standing / moving), Moverse packets |
 | `hub\space.py`, `hub\led_wall.json` | The 3D view; the wall's panel edges in tracking space |
 | `tools\led_wall_from_fbx.py` | Makes `led_wall.json` from the lab's `LEDWall.fbx` (run again if the wall model changes) |
 | `hub\vision.py` | Description of the people with the local model, sent to Unreal |

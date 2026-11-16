@@ -32,7 +32,6 @@ SETTINGS = ROOT / "hub.local.json"
 LAB_DEFAULTS = ROOT / "runtime" / "defaults.json"
 DEFAULTS = {
     "unreal_address": "", "vision_port": 0, "moverse_port": 0, "frontal_id": "", "model": vision.DEFAULT_MODEL,
-    "filter_min_cutoff": 1.0, "filter_beta": 0.05,
     "floor_distance": 50.0,  # cm from the bottom of the wall to the board's pattern, calibration step 2
     "calibration": None,     # hub/calibration.py solve() result in use
 }
@@ -433,12 +432,9 @@ class Hub(QMainWindow):
         form_box.addWidget(label("Camera positions: from the calibration (Calibration page).", "small", wrap=True))
         self.calibration_line = label("", "muted", wrap=True)
         form_box.addWidget(self.calibration_line)
-        form_box.addWidget(label("Smoothing (One Euro filter): lower min cutoff = calmer when still, "
-                                 "higher beta = less lag when moving", "small", wrap=True))
-        smooth = QFormLayout()
-        smooth.addRow("Min cutoff (Hz)", self.number_field("filter_min_cutoff", 0.01, 20, 2, 0.1))
-        smooth.addRow("Beta", self.number_field("filter_beta", 0, 5, 3, 0.01))
-        form_box.addLayout(smooth)
+        form_box.addWidget(label("What is sent: while the main person stands still, their head stays exactly where "
+                                 "it is (State: standing); when they move it follows at once, smoothed across the "
+                                 "direction they move in (State: moving).", "small", wrap=True))
         form_box.addStretch()
         settings.setFixedWidth(360)
         body.addWidget(settings)
@@ -466,7 +462,7 @@ class Hub(QMainWindow):
         live_box.addWidget(self.track_picture, 1)
         numbers = QGridLayout()
         self.track_values = {}
-        for column, key in enumerate(["X", "Y", "Z", "Rate"]):
+        for column, key in enumerate(["X", "Y", "Z", "Rate", "State"]):
             numbers.addWidget(label(key if key != "Rate" else "Rate (Hz)", "small"), 0, column)
             value = label("-", "value")
             numbers.addWidget(value, 1, column)
@@ -489,7 +485,7 @@ class Hub(QMainWindow):
 
     def tracked_people(self):
         """[(number, is main, position in tracking space cm)] for the 3D view; the main person at the
-        smoothed position that is sent to Unreal."""
+        position that is sent to Unreal."""
         tracker = self.tracker
         if not tracker:
             return []
@@ -892,6 +888,7 @@ class Hub(QMainWindow):
         for key, index in (("X", 0), ("Y", 1), ("Z", 2)):
             self.track_values[key].setText(f"{position[index]:.1f}" if position is not None else "-")
         self.track_values["Rate"].setText(f"{tracker.rate:.0f}" if tracker else "-")
+        self.track_values["State"].setText({"still": "standing", "moving": "moving"}.get(tracker.motion, "-") if tracker else "-")
         self.auto_button.setEnabled(bool(tracker and tracker.chosen))
         if tracker:
             people = list(tracker.people)

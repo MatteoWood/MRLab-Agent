@@ -15,7 +15,10 @@ lens distortion comes from the camera itself (factory calibration).
    guesses from the moments two cameras share (from the camera with the most shared moments
    outwards), then all camera positions and board positions are refined together so the board corners land
    where the cameras saw them (in turns: each board with the cameras fixed, each camera with the boards
-   fixed). Views that fit badly are dropped.
+   fixed). Views that fit badly are dropped. Last, everything at once, each camera's focal length and
+   picture centre included (bundle_adjust): on the owner's recording this halved how far apart two
+   cameras' lines of sight to the same corner pass (held-out moments: 1.1 to 0.5 mm), and cameras 2 and 6
+   came out 4.26 m apart (tape: about 4.27; before 4.38), camera 1 at 317 cm (tape: about 314; before 320).
 4. Score (0 to 100): per camera from how far, in pixels, the corners land from where the camera saw them
    (0.3 px or less: full marks, 2 px or more: none), how many views it had, and, for cameras with a measured
    height (KNOWN_HEIGHTS), whether its height comes out as measured; the total is the mean over all cameras.
@@ -69,7 +72,8 @@ def measure_lens(views, lens, most=40):
     """(lens, text): the camera's focal length and picture centre measured from its own board views (pixels),
     the lens distortion kept as the camera reports it (distortion is set in normalized coordinates, so it
     stays right when the picture is a scaled or cropped version of what the factory calibrated). In the lab
-    the cameras' own lens data made the space about 4 % too large (2026-11-10). The camera's values are kept
+    the cameras' own lens data made the space about 4 % too large (2026-11-10). This is the first guess for
+    bundle_adjust, which measures the lenses with all cameras together. The camera's values are kept
     with fewer than MIN_LENS_VIEWS views or when the measured focal length is more than 15 % off. Uses `most`
     views spread over the walk: 40 views took 2 s and gave the focal length within 0.1 % in a simulation,
     100 took 77 s for no better result."""
@@ -188,6 +192,124 @@ def refine_board(board, observations, rounds=8):
     return matrix(x[:3], x[3:])
 
 
+def rotations(rvecs):
+    """Rotation matrices (N, 3, 3) of rotation vectors (N, 3)."""
+    angle = np.linalg.norm(rvecs, axis=1)[:, None, None]
+    k = rvecs / np.maximum(angle[:, :, 0], 1e-12)
+    cross = np.zeros((len(rvecs), 3, 3))
+    cross[:, 0, 1], cross[:, 0, 2], cross[:, 1, 2] = -k[:, 2], k[:, 1], -k[:, 0]
+    cross -= cross.transpose(0, 2, 1)
+    return np.eye(3) + np.sin(angle) * cross + (1 - np.cos(angle)) * cross @ cross
+
+
+def bundle_adjust(poses, boards, shots, lenses, reference, rounds=30):
+    """All cameras, all board positions and each camera's focal length and picture centre refined together
+    (Levenberg-Marquardt), so the corners land where the cameras saw them, in pixels with the lens distortion.
+    The lenses measured one camera at a time do not use what cameras seeing the board at the same moment
+    tell about each other. poses: {number: reference-to-camera}; boards: [board-to-reference] with shots:
+    [{number: corners in pixels}]; the reference camera's pose stays fixed. Returns (poses, boards, lenses)."""
+    numbers = sorted(poses)
+    views = {n: ([j for j, shot in enumerate(shots) if n in shot],) for n in numbers}
+    views = {n: (index, np.array([shots[j][n] for j in index]).reshape(len(index), -1, 2)) for n, (index,) in views.items() if index}
+    numbers = sorted(views)
+    cams = np.array([np.concatenate([vector(poses[n]), [lenses[n]["matrix"][0][0], lenses[n]["matrix"][0][2], lenses[n]["matrix"][1][2]]])
+                     for n in numbers])
+    brds = np.array([vector(b) for b in boards])
+    steps_c = np.array([1e-6] * 3 + [1e-4] * 3 + [1e-3] * 3)
+    steps_b = np.array([1e-6] * 3 + [1e-4] * 3)
+
+    def residuals(cams, brds):
+        board_points = BOARD_POINTS @ rotations(brds[:, :3]).transpose(0, 2, 1) + brds[:, None, 3:]
+        out = {}
+        for c, n in enumerate(numbers):
+            index, seen = views[n]
+            local = board_points[index] @ rotations(cams[c:c + 1, :3])[0].T + cams[c, 3:6]
+            k = np.array([[cams[c, 6], 0, cams[c, 7]], [0, cams[c, 6], cams[c, 8]], [0, 0, 1]])
+            d = np.array(lenses[n]["distortion"], float)
+            if lenses[n]["fisheye"]:
+                pix, _ = cv2.fisheye.projectPoints(local.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), k, d[:4])
+            else:
+                pix, _ = cv2.projectPoints(local.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), k, d)
+            out[n] = pix.reshape(seen.shape) - seen
+        return out
+
+    def cost(r):
+        e = np.concatenate([np.linalg.norm(v, axis=2).ravel() for v in r.values()])
+        return float(np.sum(np.where(e <= 1.5, e ** 2, 2 * 1.5 * e - 1.5 ** 2)))  # Huber: a stray corner counts less
+
+    r0 = residuals(cams, brds)
+    current, damping = cost(r0), 1e-3
+    for _ in range(rounds):
+        jb = {n: np.empty(v.shape + (6,)) for n, v in r0.items()}
+        jc = {n: np.empty(v.shape + (9,)) for n, v in r0.items()}
+        for k in range(6):  # each residual depends on one board: all boards moved at once
+            moved = brds.copy()
+            moved[:, k] += steps_b[k]
+            r = residuals(cams, moved)
+            for n in numbers:
+                jb[n][..., k] = (r[n] - r0[n]) / steps_b[k]
+        for k in range(9):
+            moved = cams.copy()
+            moved[:, k] += steps_c[k]
+            r = residuals(moved, brds)
+            for n in numbers:
+                jc[n][..., k] = (r[n] - r0[n]) / steps_c[k]
+        hbb, gb = np.zeros((len(brds), 6, 6)), np.zeros((len(brds), 6))
+        hcc, gc = np.zeros((len(numbers) * 9,) * 2), np.zeros(len(numbers) * 9)
+        hbc = collections.defaultdict(lambda: np.zeros((6, len(numbers) * 9)))
+        for c, n in enumerate(numbers):
+            e = np.linalg.norm(r0[n], axis=2)
+            w = np.where(e <= 1.5, 1.0, 1.5 / np.maximum(e, 1e-12))[..., None]  # Huber weights per corner
+            block = slice(9 * c, 9 * c + 9)
+            for v, j in enumerate(views[n][0]):
+                a, b, r = jb[n][v].reshape(-1, 6), jc[n][v].reshape(-1, 9), r0[n][v].ravel()
+                ww = np.repeat(w[v, :, 0], 2)
+                hbb[j] += a.T @ (a * ww[:, None])
+                gb[j] += a.T @ (r * ww)
+                hcc[block, block] += b.T @ (b * ww[:, None])
+                gc[block] += b.T @ (r * ww)
+                hbc[j][:, block] += a.T @ (b * ww[:, None])
+        fixed = 9 * numbers.index(reference) if reference in numbers else None
+        while True:
+            # Schur complement: solve the cameras first, then each board on its own
+            s, rhs = hcc + damping * np.diag(np.diag(hcc)), -gc.copy()
+            if fixed is not None:
+                s[fixed:fixed + 6, :] = s[:, fixed:fixed + 6] = 0.0
+                s[range(fixed, fixed + 6), range(fixed, fixed + 6)] = 1.0
+                rhs[fixed:fixed + 6] = 0.0
+            inverses = {}
+            for j, h in enumerate(hbb):
+                inverses[j] = np.linalg.inv(h + damping * np.diag(np.diag(h)) + 1e-9 * np.eye(6))
+                hcj = hbc[j]
+                if fixed is not None:
+                    hcj = hcj.copy()
+                    hcj[:, fixed:fixed + 6] = 0.0
+                s -= hcj.T @ inverses[j] @ hcj
+                rhs += hcj.T @ inverses[j] @ gb[j]
+            dc = np.linalg.solve(s, rhs)
+            db = np.array([inverses[j] @ (-gb[j] - hbc[j] @ dc) for j in range(len(brds))])
+            new_cams, new_brds = cams + dc.reshape(-1, 9), brds + db
+            r = residuals(new_cams, new_brds)
+            new = cost(r)
+            if new < current:
+                cams, brds, r0, damping = new_cams, new_brds, r, max(damping / 3, 1e-7)
+                done = current - new < 1e-6 * current
+                current = new
+                break
+            damping *= 5
+            if damping > 1e6:
+                done = True
+                break
+        if done:
+            break
+    poses = dict(poses)
+    lenses = dict(lenses)
+    for c, n in enumerate(numbers):
+        poses[n] = matrix(cams[c, :3], cams[c, 3:6])
+        lenses[n] = dict(lenses[n], matrix=[[cams[c, 6], 0.0, cams[c, 7]], [0.0, cams[c, 6], cams[c, 8]], [0.0, 0.0, 1.0]])
+    return poses, [matrix(b[:3], b[3:]) for b in brds], lenses
+
+
 def mean_pose(poses):
     rotation = np.mean([p[:3, :3] for p in poses], axis=0)
     u, _, vt = np.linalg.svd(rotation)
@@ -280,13 +402,14 @@ def solve(walk, floor, cameras, distance):
     distance: cm from the bottom of the wall to the near edge of the board's pattern (floor shots).
     Returns {"cameras": {device id: {"number", "rotation" (camera to tracking, 3 x 3), "position" (cm),
     "error_px", "views", "score"}}, "score", "report" (lines of text)} or raises ValueError."""
-    lenses, lens_notes = {}, {}
+    lenses = {}
     for n, (_, lens) in cameras.items():
-        lenses[n], lens_notes[n] = measure_lens([shot[n] for shot in walk if n in shot], lens)
+        lenses[n], _ = measure_lens([shot[n] for shot in walk if n in shot], lens)
     focal = {n: float(lens["matrix"][0][0]) for n, lens in lenses.items()}
-    walk = [{n: normalize(c, lenses[n]) for n, c in shot.items() if n in cameras} for shot in walk]
-    walk = [shot for shot in walk if len(shot) >= 2]
-    floor = [{n: normalize(c, lenses[n]) for n, c in shot.items() if n in cameras} for shot in floor]
+    pixels = [{n: np.asarray(c, float) for n, c in shot.items() if n in cameras} for shot in walk]
+    pixels = [shot for shot in pixels if len(shot) >= 2]
+    walk = [{n: normalize(c, lenses[n]) for n, c in shot.items()} for shot in pixels]
+    floor = [{n: np.asarray(c, float) for n, c in shot.items() if n in cameras} for shot in floor]
     floor = [shot for shot in floor if shot]
     if not walk:
         raise ValueError("no moment where two cameras saw the board: walk with the board first")
@@ -317,8 +440,9 @@ def solve(walk, floor, cameras, distance):
                          "about 2 to 3 m of two neighbouring cameras, facing both")
 
     # Refine everything together, in turns, dropping views that fit badly.
-    used = [{n: c for n, c in shot.items() if n in poses} for shot in walk]
-    used = [shot for shot in used if len(shot) >= 2]
+    used = [(i, {n: c for n, c in shot.items() if n in poses}) for i, shot in enumerate(walk)]
+    ids = [i for i, shot in used if len(shot) >= 2]  # index into pixels
+    used = [shot for _, shot in used if len(shot) >= 2]
     boards = []
     for shot in used:
         n = next(iter(shot))
@@ -340,9 +464,20 @@ def solve(walk, floor, cameras, distance):
             fits =[{n: float(np.sqrt(np.mean(errors(BOARD_POINTS @ b[:3, :3].T + b[:3, 3], poses[n], c, focal[n]) ** 2)))
                      for n, c in shot.items()} for b, shot in zip(boards, used)]
             limit = min(MAX_VIEW_ERROR, 3 * float(np.median([e for fit in fits for e in fit.values()])))
-            kept = [({n: c for n, c in shot.items() if fit[n] <= max(limit, 0.5)}, b) for shot, fit, b in zip(used, fits, boards)]
-            kept = [(shot, b) for shot, b in kept if len(shot) >= 2]
-            used, boards = [s for s, _ in kept], [b for _, b in kept]
+            kept = [(i, {n: c for n, c in shot.items() if fit[n] <= max(limit, 0.5)}, b) for i, shot, fit, b in zip(ids, used, fits, boards)]
+            kept = [(i, shot, b) for i, shot, b in kept if len(shot) >= 2]
+            ids, used, boards = [i for i, _, _ in kept], [s for _, s, _ in kept], [b for _, _, b in kept]
+
+    # Then everything together, the lenses included, in pixels.
+    poses, boards, lenses = bundle_adjust(poses, boards, [{n: pixels[i][n] for n in shot} for i, shot in zip(ids, used)],
+                                          lenses, reference)
+    focal = {n: float(lens["matrix"][0][0]) for n, lens in lenses.items()}
+    used = [{n: normalize(pixels[i][n], lenses[n]) for n in shot} for i, shot in zip(ids, used)]
+    floor = [{n: normalize(c, lenses[n]) for n, c in shot.items()} for shot in floor]
+    lens_notes = {}
+    for n, (_, lens) in cameras.items():
+        new, old = lenses[n]["matrix"][0][0], lens["matrix"][0][0]
+        lens_notes[n] = f"focal length {new:.1f} px (camera: {old:.1f}, {(new / old - 1) * 100:+.1f} %)"
 
     # Floor: the board's pose from every camera that saw it, averaged over the moments.
     on_floor = []

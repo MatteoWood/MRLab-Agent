@@ -16,11 +16,13 @@ lens and its position (the hub's calibration, hub/calibration.py).
   triangulated points stand in, shifted by their distance from the eyes learned while both were seen, so
   the position does not jump when the visible points change. No depth is used: a person needs two cameras.
 - Timing: pictures are combined when taken within the slowest camera's interval between analysed pictures
-  (SAME_TIME limits) of the newest one, and each line is moved along the person's velocity to that moment.
-- The main person (clicked in the window, else the one nearest to the wall) is smoothed with a One Euro
-  filter and sent to the Unreal PC in Moverse's packet format (subject Actor0, 25 moverserig bones, head
-  at the point) at every update, so the Moverse Live Link plugin, NDC_Basic and the gaze work unchanged.
-  Moverse must not run at the same time (two senders on one port).
+  (SAME_TIME limits) of the newest one, at the middle of their capture times; each line is moved along the
+  person's velocity (a line through their positions of the last VELOCITY_SPAN s, zero when standing) to it.
+- The main person (clicked in the window, else the one nearest to the wall) goes through Motion (steady
+  while standing, quick and smoothed across the direction of movement while moving) and is sent to the
+  Unreal PC in Moverse's packet format (subject Actor0, 25 moverserig bones, head at the point) at every
+  update, so the Moverse Live Link plugin, NDC_Basic and the gaze work unchanged. Moverse must not run at
+  the same time (two senders on one port).
 """
 import collections
 import itertools
@@ -61,6 +63,29 @@ MAX_SPEED = 300.0         # cm/s: a measurement further from the expected spot t
 JUMP_SLACK = 15.0         # cm) is held back,
 HOLD_BACK = 5             # at most this many times in a row
 WALL_CLEARANCE = 25.0     # cm: a new person must be this far in front of the LED wall (Frank on the wall is no visitor)
+VELOCITY_SPAN = 0.25      # s: a person's velocity (to line up pictures taken at different moments) is the
+VELOCITY_DEAD = 8.0       # line through their positions of this span; slower than this counts as standing
+# What is sent (Motion):
+STILL_WINDOW = 0.35       # s: standing still when the line through the measurements of this span
+STILL_SPEED = 8.0         # cm/s is slower than this
+EXIT_MIN = 1.5            # cm: moving again when the head is at least this far from where it stands and further
+EXIT_SIGMAS = 2.5         # than this many times the measurement noise explains (EXIT_MAX at most),
+EXIT_MAX = 4.0
+EXIT_SPEED = 12.0         # cm/s and moving at least this fast (line through the last EXIT_WINDOW s); else it is
+EXIT_WINDOW = 0.25        # swaying or noise. Twice as far: moving anyway
+ANCHOR_TIME = 1.0         # s after stopping in which the hub learns where the head stands; then it stays there
+MAX_SPREAD = 2.5          # cm: the measurement noise is counted at most this
+SETTLE_TIME = 0.2         # s: while standing, the sent head glides to where it stands
+MOVE_WINDOW = 0.2         # s of measurements the moving head's line is drawn through
+BRAKE_SAMPLES = 4         # slowing down: the line through this many last measurements (of 0.2 s at most),
+BRAKE_WINDOW = 0.25       # and how hard it slows from a curve through this span (s)
+SLOW_SPEED = 15.0         # cm/s: below, the direction of movement is not sure (fully sure at twice this)
+ALONG_TIME = 0.02         # s: follows along the direction of movement within this
+ACROSS_TIME = 0.15        # s: and across it within this
+SLOW_TIME = 0.08          # s: and at low speed in any direction within this
+MAX_AHEAD = 0.1           # s: the head is moved on by this share of the age of the pictures (at most
+AHEAD_SHARE = 0.7         # MAX_AHEAD)
+HEADING_TIME = 0.3        # s: the direction of movement from the velocity smoothed over this
 SUBJECT = "Actor0"
 
 
@@ -136,29 +161,120 @@ def frame_packet(head, offset):
 
 
 
-class OneEuro:
-    """One Euro filter (Casiez et al. 2012) on a 3D point: smooth when still, little lag when moving."""
+def line_fit(samples, t):
+    """(position at t, velocity) of the straight line through [(time, position)] (least squares)."""
+    s = np.array([x for x, _ in samples]) - t
+    p = np.array([y for _, y in samples])
+    if len(s) < 3 or s.max() - s.min() < 0.03:
+        return p.mean(0), np.zeros(3)
+    a = np.column_stack([np.ones_like(s), s])
+    (start, velocity), *_ = np.linalg.lstsq(a, p, rcond=None)
+    return start, velocity
 
-    def __init__(self, min_cutoff, beta, d_cutoff=1.0):
-        self.min_cutoff, self.beta, self.d_cutoff = min_cutoff, beta, d_cutoff
-        self.x = self.dx = self.t = None
 
-    @staticmethod
-    def alpha(dt, cutoff):
-        return 1.0 / (1.0 + 1.0 / (2.0 * math.pi * cutoff * dt))
+class Motion:
+    """What is sent: steady while the person stands, quick and smooth while they move (2026-11-16; before,
+    a One Euro filter let about 1 cm of the measurements' noise through, and the wall's view flickered).
 
-    def __call__(self, x, t):
-        if self.t is None or t <= self.t:
-            self.x, self.dx, self.t = x, np.zeros(3), t
-            return x
-        dt = t - self.t
-        dx = (x - self.x) / dt
-        a_d = self.alpha(dt, self.d_cutoff)
-        self.dx = a_d * dx + (1 - a_d) * self.dx
-        cutoff = self.min_cutoff + self.beta * np.linalg.norm(self.dx)
-        a = self.alpha(dt, cutoff)
-        self.x, self.t = a * x + (1 - a) * self.x, t
-        return self.x
+    Two states:
+    - "still": the sent head stays where it is. In the first ANCHOR_TIME after stopping the hub learns where
+      the head stands (the mean of the measurements; the sent head glides there, in steps of 0.2 mm or
+      more), and all along how noisy the measurements are. The person moves again when the median of the
+      last 5 measurements is further from that place than the noise explains (EXIT_SIGMAS, EXIT_MIN to
+      EXIT_MAX) and the head moves at EXIT_SPEED or more, twice in a row; or twice that far once. Swaying
+      on the spot and the noise are not movement.
+    - "moving": a straight line through the measurements of the last MOVE_WINDOW s gives where the head is
+      and its velocity, without the lag of an average. It is moved on by AHEAD_SHARE of the pictures' age
+      (about 0.1 s when sent), so the wall does not trail behind (all of it: the rhythm of the steps and
+      every turn were overdone). When the head slows down, the line through the last few measurements is
+      used and the head is moved on only as far as it will still go, so it does not overshoot where the
+      person stops. The direction of movement comes from the velocity smoothed over HEADING_TIME (the
+      velocity of each moment swings with the steps). Along it the head follows at once; across it
+      (sideways sway, the bobbing of the steps) within ACROSS_TIME. At low speed the direction is unsure:
+      both within SLOW_TIME, not moved on. It is "still" again once the line through the last
+      STILL_WINDOW s is slower than STILL_SPEED.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.history = collections.deque()  # (picture time, measured head)
+        self.state, self.out, self.t = "moving", None, None
+        self.anchor, self.count, self.spread, self.away, self.since = None, 0, 0.0, 0, 0.0
+        self.heading = None  # smoothed velocity while moving
+
+    def __call__(self, raw, t, now):
+        """The head to send for the measured head `raw` of the pictures taken at t (time.perf_counter()),
+        sent at now."""
+        raw = np.asarray(raw, float)
+        history = self.history
+        history.append((t, raw))
+        while t - history[0][0] > STILL_WINDOW + 0.1:
+            history.popleft()
+        if self.out is None:
+            self.out, self.t = raw.copy(), t
+            return self.out.copy()
+        dt, self.t = max(t - self.t, 1e-3), t
+        if self.state == "still":
+            recent = [p for s, p in list(history)[-5:] if t - s <= 0.25]
+            off = float(np.linalg.norm(np.median(recent, axis=0) - self.anchor))
+            limit = min(EXIT_MAX, max(EXIT_MIN, EXIT_SIGMAS * 1.25 * self.spread / math.sqrt(len(recent))))
+            if limit < off <= 2 * limit and \
+                    np.linalg.norm(line_fit([(s, p) for s, p in history if t - s <= EXIT_WINDOW], t)[1]) < EXIT_SPEED:
+                off = limit  # off, but not moving away: swaying on the spot, or noise
+            self.away = self.away + 1 if off > limit else 0
+            if self.away < 2 and off <= 2 * limit:
+                gap = float(np.linalg.norm(raw - self.anchor))
+                if gap < max(2 * self.spread, EXIT_MIN):  # learn the place and the noise (not from outliers)
+                    if t - self.since < ANCHOR_TIME:
+                        self.count += 1
+                        self.anchor = self.anchor + (raw - self.anchor) / self.count
+                    self.spread = min(MAX_SPREAD, math.sqrt(0.97 * self.spread ** 2 + 0.03 * gap ** 2))
+                step = (self.anchor - self.out) * (1 - math.exp(-dt / SETTLE_TIME))
+                if np.linalg.norm(step) >= 0.02:
+                    self.out = self.out + step
+                return self.out.copy()
+            self.state, self.heading = "moving", None
+        settled = [(s, p) for s, p in history if t - s <= STILL_WINDOW]
+        if settled[-1][0] - settled[0][0] >= STILL_WINDOW * 0.8 and np.linalg.norm(line_fit(settled, t)[1]) < STILL_SPEED:
+            points = np.array([p for _, p in settled])
+            self.state, self.anchor, self.count, self.away, self.since = "still", points.mean(0), len(points), 0, t
+            self.spread = min(MAX_SPREAD, max(0.3, float(np.sqrt(np.mean(np.sum((points - self.anchor) ** 2, 1))))))
+            return self.out.copy()
+        position, velocity = line_fit([(s, p) for s, p in history if t - s <= MOVE_WINDOW], t)
+        self.heading = velocity if self.heading is None else \
+            self.heading + (1 - math.exp(-dt / HEADING_TIME)) * (velocity - self.heading)
+        speed = float(np.linalg.norm(velocity))
+        ahead = AHEAD_SHARE * min(max(now - t, 0.0), MAX_AHEAD)
+        shift = velocity * ahead
+        if speed > 0:
+            last = [(s, p) for s, p in list(history)[-BRAKE_SAMPLES:] if t - s <= 0.2]
+            if len(last) >= 3:
+                position_last, velocity_last = line_fit(last, t)
+                if velocity_last @ velocity / speed < speed:  # slowing down: the line through the last ones
+                    position, velocity = position_last, velocity_last
+                    speed = max(float(np.linalg.norm(velocity)), 1e-9)
+            shift = velocity * ahead
+            curve = [(s, p) for s, p in history if t - s <= BRAKE_WINDOW]
+            if len(curve) >= 5:
+                s = np.array([x for x, _ in curve]) - t
+                c = np.linalg.lstsq(np.column_stack([np.ones_like(s), s, s * s]), np.array([p for _, p in curve]), rcond=None)[0]
+                slowing = -2 * c[2] @ velocity / speed  # cm/s2 along the movement, positive when slowing down
+                if slowing > 0:
+                    direction = velocity / speed
+                    ahead = min(ahead, speed / slowing)  # not beyond where it stops
+                    shift = velocity * ahead - 0.5 * slowing * ahead ** 2 * direction
+                    position = position - slowing * MOVE_WINDOW ** 2 / 12 * direction  # a line runs ahead of a braking path
+        heading = float(np.linalg.norm(self.heading))
+        sure = min(1.0, max(0.0, (heading - SLOW_SPEED) / SLOW_SPEED))  # how sure the direction is: 0 to 1
+        delta = position + sure * shift - self.out
+        along = (delta @ self.heading / heading) * self.heading / heading if heading > 0 else np.zeros(3)
+        across = delta - along
+        along_time = SLOW_TIME + sure * (ALONG_TIME - SLOW_TIME)
+        across_time = SLOW_TIME + sure * (ACROSS_TIME - SLOW_TIME)
+        self.out = self.out + along * (1 - math.exp(-dt / along_time)) + across * (1 - math.exp(-dt / across_time))
+        return self.out.copy()
 
 
 # ---------- lines of sight ----------
@@ -244,14 +360,15 @@ class Tracker(threading.Thread):
         self.tracks = {}       # number -> person (also not confirmed ones, and unseen for up to FORGET_AFTER)
         self.next_number = 1
         self.main_seen = 0.0   # when the main person was last seen
-        self.smooth = OneEuro(settings["filter_min_cutoff"], settings["filter_beta"])
+        self.filter = Motion()
         self.last_main, self.last_time, self.last_seen, self.times = None, 0.0, 0.0, []
         # Shown in the window (read by the window's thread):
         self.status = "starting"
         self.people = []       # [{"number", "position" (cm), "cameras" (numbers)}] confirmed, seen in the last LOST_AFTER s
         self.main = None       # number of the main person, whose head is sent
         self.chosen = False    # main person chosen by a click (else: automatic, nearest to the wall)
-        self.position = None   # filtered head position of the main person (cm)
+        self.position = None   # head position of the main person that is sent (cm)
+        self.motion = None     # "still" or "moving" (Motion), None without a main person
         self.rate = 0.0        # updates of the main person per second
         self.combined = 0      # cameras that saw a person in the pictures of the last update
         self.pending = 0       # people found but not confirmed yet
@@ -380,8 +497,8 @@ class Tracker(threading.Thread):
                 time.sleep(0.5)
 
     def update(self, now):
-        """One combining step (now: the time on time.perf_counter()); True when the main person's smoothed
-        head position (self.position) changed and should be sent."""
+        """One combining step (now: the time on time.perf_counter()); True when there is a head position of
+        the main person to send (self.position, also when it stays where it was: standing still)."""
         with self.wake:
             if self.version == self.used:
                 return False
@@ -392,22 +509,27 @@ class Tracker(threading.Thread):
             return False
         newest = max(captured for captured, _ in views)
         seen = [person for captured, people in views if newest - captured <= window for person in people]
-        updated = self.locate(seen, newest, now)
+        # The pictures are combined at the middle of their capture times, each line moved along the person's
+        # velocity to it: an error in that velocity moves the older and the newer ones apart, not all ahead
+        # (combined at the newest one, the head ran past where a person stopped: 9 cm at 80 ms per picture)
+        moment = float(np.mean([captured for captured, _ in views if newest - captured <= window]))
+        updated = self.locate(seen, moment, now)
         self.combined = len({person["camera"] for person in seen})
         self.pending = sum(not track["confirmed"] for track in self.tracks.values())
         main = self.choose_main(now)
         if main is None or main not in updated:
             if now - self.last_seen > LOST_AFTER:
-                self.position = None
-                self.smooth.t = None  # start fresh when someone comes back
+                self.position = self.motion = None
+                self.filter.reset()  # start fresh when someone comes back
             return False
         if newest <= self.last_time:
             return False
         if main != self.last_main:
-            self.smooth.t = None  # another person: no gliding from the old one's position
+            self.filter.reset()  # another person: no gliding from the old one's position
             self.last_main = main
         self.last_seen, self.last_time = now, newest
-        self.position = self.smooth(self.tracks[main]["position"], newest)
+        self.position = self.filter(self.tracks[main]["position"], moment, now)
+        self.motion = self.filter.state
         self.times = [t for t in self.times if now - t < 1.0] + [now]
         self.rate = len(self.times)
         return True
@@ -538,14 +660,15 @@ class Tracker(threading.Thread):
             if not eyes:  # stand-in points only: less sure, so only part of the way
                 head = expected + FALLBACK_SHARE * (head - expected)
         track["held"] = 0
-        path = track["path"]  # positions of the last 0.15 s: velocity over that span (less noisy than per update)
+        path = track["path"]
         path.append((t, head))
-        while path and t - path[0][0] > 0.15:
+        while path and t - path[0][0] > VELOCITY_SPAN:
             path.popleft()
-        if len(path) >= 2 and path[-1][0] - path[0][0] >= 0.05:
-            velocity = (path[-1][1] - path[0][1]) / (path[-1][0] - path[0][0])
-            speed = float(np.linalg.norm(velocity))
-            track["velocity"] = velocity * min(1.0, 300.0 / speed) if speed > 0 else velocity
+        velocity = line_fit(list(path), t)[1]  # a straight line: less noisy than from two positions
+        speed = float(np.linalg.norm(velocity))
+        # Slower than the noise of the measurements: standing (else the lines would shake with the noise)
+        share = min(1.0, max(0.0, (speed - VELOCITY_DEAD) / VELOCITY_DEAD)) * min(1.0, 300.0 / speed) if speed > 0 else 0.0
+        track["velocity"] = velocity * share
         track.update(position=head, time=t, seen=now, cameras=sorted(cameras))
         track["hits"] += 1
         track["seen_by"].update(cameras)
