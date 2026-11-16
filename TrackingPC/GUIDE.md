@@ -20,6 +20,7 @@ What it does and does not touch:
 - It never writes `runtime`, your settings (`hub.local.json`) or the recordings, and deletes nothing.
 - It downloads everything first. If the download fails, or the hub is still open (its files cannot be
   replaced then), it says so and nothing is changed.
+- GitHub answers about 30 updates an hour from one network. Beyond that it says after what time to try again.
 
 The first time only, `update.bat` is not there yet. Open the black window in the TrackingPC folder and run:
 

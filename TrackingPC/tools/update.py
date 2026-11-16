@@ -18,6 +18,8 @@ import json
 import pathlib
 import shutil
 import sys
+import time
+import urllib.error
 import urllib.request
 
 REPO = "MatteoWood/MRLab-Agent"
@@ -30,19 +32,23 @@ NEVER = ("runtime", "recordings")                      # top-level folders never
 
 def fetch(url):
     request = urllib.request.Request(url, headers={"User-Agent": "MRLab-Hub-update"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.read()
+    except urllib.error.HTTPError as error:
+        if error.code in (403, 429) and error.headers.get("X-RateLimit-Remaining") == "0":
+            reset = time.strftime("%H:%M", time.localtime(int(error.headers.get("X-RateLimit-Reset", "0"))))
+            sys.exit(f"GitHub answers only 60 version questions an hour from one network (an update asks 2); "
+                     f"try again after {reset}. Nothing was changed.")
+        raise
 
 
-def listing(path, ref):
-    """Paths of all files under path at ref (GitHub contents API, one request per folder)."""
-    files = []
-    for entry in json.loads(fetch(f"https://api.github.com/repos/{REPO}/contents/{path}?ref={ref}")):
-        if entry["type"] == "dir":
-            files += listing(entry["path"], ref)
-        elif entry["type"] == "file":
-            files.append(entry["path"])
-    return files
+def listing(commit):
+    """Paths of all files of FOLDER at the commit: GitHub's list of all files of that version (one request)."""
+    tree = json.loads(fetch(f"https://api.github.com/repos/{REPO}/git/trees/{commit['commit']['tree']['sha']}?recursive=1"))
+    if tree.get("truncated"):
+        raise RuntimeError("GitHub sent only part of the list of files")
+    return [entry["path"] for entry in tree["tree"] if entry["type"] == "blob" and entry["path"].startswith(FOLDER + "/")]
 
 
 def inside(relative):
@@ -62,11 +68,11 @@ def same(target, copy):
         return False
 
 
-def update(sha):
+def update(commit):
     """Downloads the version into STAGE, then replaces the changed files; ({target: copy}, [changed targets])."""
-    files = {}  # target in this folder -> downloaded copy
+    sha, files = commit["sha"], {}  # files: target in this folder -> downloaded copy
     try:
-        for path in listing(FOLDER, sha):
+        for path in listing(commit):
             relative = pathlib.PurePosixPath(path).relative_to(FOLDER)
             target = inside(relative)
             if target is None:
@@ -110,7 +116,7 @@ def main():
     print(f"Version {sha[:7]} of {commit['commit']['committer']['date'][:10]}: {commit['commit']['message'].splitlines()[0]}")
     shutil.rmtree(STAGE, ignore_errors=True)
     try:
-        files, changed = update(sha)
+        files, changed = update(commit)
     finally:
         shutil.rmtree(STAGE, ignore_errors=True)
     names = sorted(str(t.relative_to(HERE)) for t in changed)
