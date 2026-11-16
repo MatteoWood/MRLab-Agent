@@ -23,8 +23,16 @@ lens and its position (the hub's calibration, hub/calibration.py).
   Unreal PC in Moverse's packet format (subject Actor0, 25 moverserig bones, head at the point) at every
   update, so the Moverse Live Link plugin, NDC_Basic and the gaze work unchanged. Moverse must not run at
   the same time (two senders on one port).
+- Tracking log (Recorder, Tracking page "Record tracking data"): what the tracker gets (each analysed
+  picture's people: boxes and body points, numbers only, no pictures) and does (each combining step, each
+  head sent), so a lab session can be replayed through this or a newer tracker (tools/replay_tracking.py).
+- Calibration watch: by how much, on average over the last WATCH_SPAN s, each camera's lines of sight point
+  beside the face points triangulated from all cameras (an angle). The pose model's noise scatters them to
+  all sides and averages out; a camera that was bumped or turned after the calibration points beside them
+  steadily, to one side.
 """
 import collections
+import gzip
 import itertools
 import json
 import math
@@ -86,6 +94,10 @@ SLOW_TIME = 0.08          # s: and at low speed in any direction within this
 MAX_AHEAD = 0.1           # s: the head is moved on by this share of the age of the pictures (at most
 AHEAD_SHARE = 0.7         # MAX_AHEAD)
 HEADING_TIME = 0.3        # s: the direction of movement from the velocity smoothed over this
+WATCH_SPAN = 30.0         # s of lines of sight the calibration watch looks at
+WATCH_DEGREES = 0.5       # degrees: a camera whose lines point beside the face points by more than this on
+                          # average has likely moved (owner's walk, judged on 20 s or more: as calibrated at most
+                          # 0.14; one camera turned by 1 degree after calibrating: 0.7 to 0.9, only that one)
 SUBJECT = "Actor0"
 
 
@@ -337,6 +349,34 @@ def robust_point(lines):
     return None
 
 
+class Recorder:
+    """The tracking log: one JSON item per line, gzip. Any thread puts items; the tracker's thread writes."""
+
+    def __init__(self, path, header):
+        self.path, self.lock, self.items, self.count = path, threading.Lock(), [], 0
+        self.file = gzip.open(path, "wt", encoding="utf-8")
+        self.put(header)
+
+    def put(self, item):
+        with self.lock:
+            if self.file:
+                self.items.append(item)
+
+    def flush(self):
+        with self.lock:
+            items, self.items = self.items, []
+            if self.file:
+                self.file.writelines(json.dumps(item, separators=(",", ":")) + "\n" for item in items)
+                self.count += len(items)
+
+    def close(self):
+        self.flush()
+        with self.lock:
+            if self.file:
+                self.file.close()
+                self.file = None
+
+
 class Tracker(threading.Thread):
     def __init__(self, cameras, poses, settings, log=print):
         """cameras: [Camera] streaming; poses: {device id: {"number", "rotation", "position", "matrix"}}
@@ -370,7 +410,15 @@ class Tracker(threading.Thread):
         self.position = None   # head position of the main person that is sent (cm)
         self.motion = None     # "still" or "moving" (Motion), None without a main person
         self.rate = 0.0        # updates of the main person per second
+        self.age = None        # ms from the newest picture's capture to sending (median over 1 s)
+        self.ages = []
         self.combined = 0      # cameras that saw a person in the pictures of the last update
+        self.agreement = {}    # camera number -> degrees its lines of sight point beside the face points (mean)
+        self.moved = set()     # camera numbers the calibration watch marks
+        self.turns = {number: rotation for number, rotation, _ in self.poses.values()}  # camera to tracking
+        self.recorder = None   # Recorder while the tracking log is written
+        self.gaps = collections.defaultdict(collections.deque)  # camera number -> (time, x, y) of the offset
+        self.watched = 0.0
         self.pending = 0       # people found but not confirmed yet
         self.sent = 0
         for camera in self.cameras:
@@ -381,6 +429,20 @@ class Tracker(threading.Thread):
         for camera in self.cameras:
             camera.on_people = None
             camera.worker.pose(None)
+        self.stop_recording()
+
+    def start_recording(self, path, calibration):
+        """Starts the tracking log at path; calibration: the poses the tracker was given."""
+        lenses = {c.device_id: {"number": self.poses[c.device_id][0], "address": str(c.address), "lens": c.lens}
+                  for c in self.cameras}
+        header = {"tracking_log": 1, "made": time.strftime("%Y-%m-%d %H:%M:%S"), "cameras": lenses,
+                  "calibration": calibration, "unreal": [self.settings["unreal_address"], self.settings["moverse_port"]]}
+        self.recorder = Recorder(path, json.loads(json.dumps(header, default=float)))
+
+    def stop_recording(self):
+        recorder, self.recorder = self.recorder, None
+        if recorder:
+            recorder.close()
 
     # ---------- called from the camera threads ----------
 
@@ -406,6 +468,10 @@ class Tracker(threading.Thread):
                              "line": {"origin": origin, "direction": next(directions), "weight": 1.0, "captured": captured},
                              "box": (box[0] / w, box[1] / h, box[2] / w, box[3] / h), "head": (head[0] / w, head[1] / h),
                              "number": None})
+        recorder = self.recorder
+        if recorder:
+            logged = [[[float(v) for v in box], points.tolist(), float(score)] for box, points, score in people]
+            arrival = time.perf_counter()
         with self.wake:
             previous = self.views.get(camera.device_id)
             if previous is not None and 0 < captured - previous[0] < 1.0:
@@ -413,6 +479,8 @@ class Tracker(threading.Thread):
                 self.intervals[camera.device_id] = 0.8 * last + 0.2 * (captured - previous[0])
             self.views[camera.device_id] = (captured, seen)
             self.version += 1
+            if recorder:  # in the order the tracker gets them, numbered as it counts them
+                recorder.put({"p": arrival, "v": self.version, "d": camera.device_id, "c": captured, "people": logged})
             self.wake.notify()
 
     # ---------- for the window ----------
@@ -482,6 +550,9 @@ class Tracker(threading.Thread):
                     self.log(f"tracking: error in combining, still running:\n{error}")
                     last_error = error
                 continue
+            recorder = self.recorder
+            if recorder:
+                recorder.flush()
             if not changed:
                 continue
             try:
@@ -490,11 +561,26 @@ class Tracker(threading.Thread):
                     last_subject = now
                 sock.sendto(frame_packet(self.position, offset), address)
                 if self.sent == 0:
-                    self.log(f"tracking: first packet sent to {address[0]}:{address[1]}")
+                    self.log(f"tracking: first packet sent to {address[0]}:{address[1]}{self.sender(address)}")
                 self.sent += 1
             except OSError as error:
                 self.log(f"tracking: send failed: {error}")
                 time.sleep(0.5)
+
+    def sender(self, address):
+        """' from <this PC's address>' the packets leave from (the system picks it by the route to the
+        Unreal PC), with a warning when it is on the cameras' network."""
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.connect(address)
+            local = probe.getsockname()[0]
+            probe.close()
+        except OSError:
+            return ""
+        prefix = local.rsplit(".", 1)[0] + "."
+        if any(str(camera.address).startswith(prefix) for camera in self.cameras):
+            return f" from {local}: that is the cameras' network, the packets likely do not reach the Unreal PC"
+        return f" from this PC's address {local}"
 
     def update(self, now):
         """One combining step (now: the time on time.perf_counter()); True when there is a head position of
@@ -503,6 +589,8 @@ class Tracker(threading.Thread):
             if self.version == self.used:
                 return False
             self.used = self.version
+            if self.recorder:
+                self.recorder.put({"u": now, "v": self.used})
             views = list(self.views.values())
             window = min(SAME_TIME[1], max(SAME_TIME[0], 1.1 * max(self.intervals.values(), default=0.0)))
         if not views:  # no camera has delivered yet (this stopped the tracker in the lab, 2026-11-10)
@@ -515,6 +603,9 @@ class Tracker(threading.Thread):
         moment = float(np.mean([captured for captured, _ in views if newest - captured <= window]))
         updated = self.locate(seen, moment, now)
         self.combined = len({person["camera"] for person in seen})
+        if now - self.watched > 1.0:
+            self.watch(moment)
+            self.watched = now
         self.pending = sum(not track["confirmed"] for track in self.tracks.values())
         main = self.choose_main(now)
         if main is None or main not in updated:
@@ -532,7 +623,28 @@ class Tracker(threading.Thread):
         self.motion = self.filter.state
         self.times = [t for t in self.times if now - t < 1.0] + [now]
         self.rate = len(self.times)
+        self.ages = [(s, a) for s, a in self.ages if now - s < 1.0] + [(now, now - newest)]
+        self.age = 1000 * float(np.median([a for _, a in self.ages]))
+        if self.recorder:
+            self.recorder.put({"s": now, "m": moment, "main": main, "state": self.motion, "pos": self.position.tolist(),
+                               "raw": self.tracks[main]["position"].tolist()})
         return True
+
+    def watch(self, t):
+        """Calibration watch: per camera the mean offset of its lines of sight from the triangulated face points
+        over the last WATCH_SPAN s, in degrees; marks (and logs once) a camera off by more than WATCH_DEGREES."""
+        angles = {}
+        for number, gaps in self.gaps.items():
+            while gaps and t - gaps[0][0] > WATCH_SPAN:
+                gaps.popleft()
+            if len(gaps) >= 100 and gaps[-1][0] - gaps[0][0] >= WATCH_SPAN * 2 / 3:  # judged on 20 s or more
+                offset = np.array([(x, y) for _, x, y in gaps]).mean(0)
+                angles[number] = math.degrees(float(np.linalg.norm(offset)))
+        moved = {number for number, angle in angles.items() if angle > WATCH_DEGREES}
+        for number in sorted(moved - self.moved):
+            self.log(f"tracking: camera {number} points {angles[number]:.1f} degrees beside where the other cameras see "
+                     f"the people: moved? Calibrate again.")
+        self.agreement, self.moved = angles, moved
 
     def locate(self, seen, t, now):
         """Numbers the people seen in the pictures and moves the known people; returns the numbers of the
@@ -604,8 +716,7 @@ class Tracker(threading.Thread):
                        for n, track in self.tracks.items() if track["confirmed"] and now - track["seen"] <= LOST_AFTER]
         return {n for n in updated if n in self.tracks and self.tracks[n]["confirmed"]}
 
-    @staticmethod
-    def head(track, people, t):
+    def head(self, track, people, t):
         """(head position, whether from both eyes) of one person from the lines of sight of their face points,
         or None."""
         points = {}
@@ -614,11 +725,19 @@ class Tracker(threading.Thread):
             for person in people:
                 line = person["face"].get(k)
                 if line is not None:  # moved along the person's velocity to the moment t
-                    lines.append(dict(line, origin=line["origin"] + track["velocity"] * (t - line["captured"])))
+                    lines.append(dict(line, origin=line["origin"] + track["velocity"] * (t - line["captured"]),
+                                      camera=person["camera"]))
             if len(lines) >= 2:
                 point = robust_point(lines)
                 if point is not None:
                     points[k] = point
+                    if len(lines) >= 3:  # calibration watch (with two lines both are off equally)
+                        for line in lines:
+                            turn = self.turns[line["camera"]]
+                            to_point, along = turn.T @ (point - line["origin"]), turn.T @ line["direction"]
+                            if to_point[2] > 0:  # in the camera's picture: where the point is, where it was seen
+                                self.gaps[line["camera"]].append(
+                                    (t, *(to_point[:2] / to_point[2] - along[:2] / along[2])))
         named = {"left eye": points.get(pose.LEFT_EYE), "right eye": points.get(pose.RIGHT_EYE),
                  "nose": points.get(pose.NOSE), "left ear": points.get(pose.LEFT_EAR), "right ear": points.get(pose.RIGHT_EAR)}
         offsets = track["offsets"]

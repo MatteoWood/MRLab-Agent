@@ -4,10 +4,12 @@ The program for the tracking PC (the PC with the 8 OAK cameras). It replaces the
 Frank runs: it shows the cameras, tracks the visitor's head for the wall's 3D view, and describes
 the people in front of the wall for Frank. Main README: section 4.12 (vision) and Step 8.
 
+**How to use it in the lab, step by step: [GUIDE.md](GUIDE.md)** (update, calibrate, tracking, recording a test run or a tracking log, the packet check on the Unreal PC, measuring the delay).
+
 ## Two parts
 | Part | Where | Changes |
 |---|---|---|
-| Code: `MRLabHub.exe`, `hub\`, `launcher\`, scripts | Git (this folder) | often; copy the new files over the old ones |
+| Code: `MRLabHub.exe`, `hub\`, `launcher\`, `tools\`, scripts | Git (this folder) | often; `tools\update.py` brings all of it to a version (GUIDE.md, 1) |
 | `runtime\`: portable Python with its packages (incl. ONNX Runtime), Ollama, the vision model, the tracking model (`pc_models\yolo11n-pose.onnx`), the lab defaults (`defaults.json`: Unreal PC address and Moverse port); about 6.8 GB | USB stick, not in Git | once |
 
 The hub only runs when both are together: `runtime\` must sit next to `MRLabHub.exe`.
@@ -71,9 +73,13 @@ The hub numbers them in this order from their network addresses, listed as `came
      camera above the picture to see its view: each person has a number (P1, P2, ...), the same in every
      camera. Only the main person (blue box, "MAIN") is sent; **click a person** to choose them. Without a
      click it is the person nearest to the wall; if the clicked person is gone for 2 s, the nearest again.
-     X/Y/Z show the head position that is sent, Rate the updates per second, State whether the main person
-     stands (the sent head stays exactly where it is, so the wall's view is still) or moves (it follows at once,
-     smoothed sideways to the direction of movement); the line below which cameras see the main person. `NDC_Basic` on the Unreal PC moves the view as with Moverse. Moverse must not run at the same time.
+     X/Y/Z show the head position that is sent, Rate the updates per second, Picture age how old the newest
+     picture is when its head is sent (ms), State whether the main person stands (the sent head stays exactly
+     where it is, so the wall's view is still) or moves (it follows at once, smoothed sideways to the direction
+     of movement); the line below which cameras see the main person. On the left the calibration watch: per
+     camera, by how many degrees it points beside where the others see the people; above 0.5 it is marked
+     "MOVED? calibrate again". **Record tracking data** (best pressed before Start tracking) writes a log of
+     what the tracker gets and sends, numbers only, to `recordings\` for replays on the laptop (GUIDE.md, 5). `NDC_Basic` on the Unreal PC moves the view as with Moverse. Moverse must not run at the same time.
      With tracking on, "What Frank sees" (Vision page) starts with "Main visitor" when Camera 1 sees them.
    - **3D view**: the lab with the LED wall, the floor, the calibrated cameras (dot and a short line where they
      look) and every tracked person live (own colour, the main person bigger, a fading trail, a line down to a
@@ -88,11 +94,16 @@ The hub numbers them in this order from their network addresses, listed as `came
 ## If Unreal does not receive the tracking
 The hub sends the same packets as Moverse (same format, same port), so check, in this order:
 1. Tracking page, line under the picture: "... N packets sent to <address>:<port>" must count up while you are
-   tracked. The Log (Vision page) shows "tracking: first packet sent to ..." or "send failed: ...".
+   tracked. The Log (Vision page) shows "tracking: first packet sent to ... from this PC's address ..." (a
+   warning there when that address is on the cameras' network) or "send failed: ...".
 2. The address and port on the Tracking page are the ones Moverse sends to (from `runtime\defaults.json`).
-3. On the Unreal PC, in Play: Window > Virtual Production > Live Link: the Moverse source and the subject
+3. Do the packets reach the Unreal PC? Close Unreal there, run `Tools\udp_listen.py` (GUIDE.md, "Do the
+   packets arrive?"): it prints the packets per second and the head position in them. Arriving: look at
+   Unreal (step 4). Not arriving: the network: on the tracking PC `ping <Unreal PC address>` and, read only,
+   `powershell Find-NetRoute -RemoteIPAddress <Unreal PC address>` (which network card the packets take).
+4. On the Unreal PC, in Play: Window > Virtual Production > Live Link: the Moverse source and the subject
    `Actor0` (green while data arrives). Moverse itself works with this Unreal session (proves the Unreal side).
-4. Firewall of the tracking PC (read only, nothing changed): in a Command Prompt
+5. Firewall of the tracking PC (read only, nothing changed): in a Command Prompt
    `netsh advfirewall show currentprofile` shows "Firewall Policy". `BlockInbound,AllowOutbound` is the normal
    setting; with `BlockOutbound` only allowed programs may send, and the portable Python is not one of them
    (allowing it is the owner's or the lab IT's decision).
@@ -115,9 +126,13 @@ The hub sends the same packets as Moverse (same format, same port), so check, in
 | `hub\tracking.py` | Head tracker: lines of sight from all calibrated cameras, people across cameras, what is sent (standing / moving), Moverse packets |
 | `hub\space.py`, `hub\led_wall.json` | The 3D view; the wall's panel edges in tracking space |
 | `tools\led_wall_from_fbx.py` | Makes `led_wall.json` from the lab's `LEDWall.fbx` (run again if the wall model changes) |
+| `GUIDE.md` | How to use the hub and the tools, step by step |
+| `tools\update.py` | Brings this folder's code to a version from GitHub (GUIDE.md, 1) |
+| `tools\pose_pass.py`, `tools\replay_calibration.py`, `tools\replay_tracking.py`, `tools\test_person.py`, `tools\live_test.py`, `tools\replay.py`, `tools\fakecams\` | Tests on the laptop with recordings and tracking logs (GUIDE.md, 9) |
+| `..\Tools\udp_listen.py` (project folder) | On the Unreal PC: do the hub's packets arrive (GUIDE.md, 7) |
 | `hub\vision.py` | Description of the people with the local model, sent to Unreal |
 | `hub\ollama.py` | Starts and stops the hub's own Ollama |
 | `mrlab_camera_service.py` | Vision without a window (also for the laptop: `--source webcam`) |
-| `record_cameras.py` | Records 30 s of all cameras' pictures with their times into `recordings\` (for testing the tracking without the lab; the recordings show people: each recordings folder has its own `.gitignore`, keep them out of Git and delete them when done) |
+| `record_cameras.py` | Records all cameras' pictures with their times into `recordings\<date>_<time>_<kind>\`: a guided test run with prompts (marks A and B, eye height), a board run, or a free one (GUIDE.md, 6; the recordings show people: the recordings folders have their own `.gitignore`, keep them out of Git and delete them when done) |
 | `1_check_pc.bat` ... `4_run.bat`, `env.bat`, `tracking_pc.ps1`, `find_cameras.py` | Console tools and `2_setup.bat`, which builds `runtime\` |
 | `hub.local.json`, `mrlab_camera_service.local.json` | Local settings, not in Git |

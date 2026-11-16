@@ -432,6 +432,8 @@ class Hub(QMainWindow):
         form_box.addWidget(label("Camera positions: from the calibration (Calibration page).", "small", wrap=True))
         self.calibration_line = label("", "muted", wrap=True)
         form_box.addWidget(self.calibration_line)
+        self.agreement_line = label("", "small", wrap=True)
+        form_box.addWidget(self.agreement_line)
         form_box.addWidget(label("What is sent: while the main person stands still, their head stays exactly where "
                                  "it is (State: standing); when they move it follows at once, smoothed across the "
                                  "direction they move in (State: moving).", "small", wrap=True))
@@ -453,6 +455,10 @@ class Hub(QMainWindow):
         self.auto_button = QPushButton("Automatic (nearest to the wall)")
         self.auto_button.clicked.connect(self.follow_nearest)
         top.addWidget(self.auto_button)
+        self.record_button = QPushButton("Record tracking data")
+        self.record_button.setCheckable(True)
+        self.record_button.toggled.connect(self.record_tracking)
+        top.addWidget(self.record_button)
         live_box.addLayout(top)
         self.track_picture = ClickablePicture(self.pick_person)
         self.track_picture.setObjectName("picture")
@@ -462,8 +468,8 @@ class Hub(QMainWindow):
         live_box.addWidget(self.track_picture, 1)
         numbers = QGridLayout()
         self.track_values = {}
-        for column, key in enumerate(["X", "Y", "Z", "Rate", "State"]):
-            numbers.addWidget(label(key if key != "Rate" else "Rate (Hz)", "small"), 0, column)
+        for column, key in enumerate(["X", "Y", "Z", "Rate", "Age", "State"]):
+            numbers.addWidget(label({"Rate": "Rate (Hz)", "Age": "Picture age (ms)"}.get(key, key), "small"), 0, column)
             value = label("-", "value")
             numbers.addWidget(value, 1, column)
             self.track_values[key] = value
@@ -676,11 +682,36 @@ class Hub(QMainWindow):
                      "the Unreal PC address and the Moverse port")
             return
         self.tracker = tracking.Tracker(ready, poses, dict(s), self.log)
+        if self.record_button.isChecked():  # switched on before: the log starts with the tracker
+            self.start_log()
         self.tracker.start()
         self.log(f"tracking started with {len(ready)} cameras, sending to {s['unreal_address']}:{s['moverse_port']}")
 
+    def record_tracking(self, on):
+        """Tracking log on or off (Tracking page). On before Start tracking: each tracking session gets its log
+        from its start (replays exactly); on while tracking: from now."""
+        if on and self.tracker:
+            self.start_log()
+        elif not on:
+            self.save_log()
+
+    def start_log(self):
+        folder = ROOT / "recordings"
+        folder.mkdir(exist_ok=True)
+        (folder / ".gitignore").write_text("*\n")  # recordings stay local: never into Git
+        path = folder / f"tracking_{time.strftime('%Y-%m-%d_%H-%M-%S')}.jsonl.gz"
+        self.tracker.start_recording(path, self.settings["calibration"]["cameras"])
+        self.log(f"tracking data recorded to {path.relative_to(ROOT)} (numbers only, no pictures)")
+
+    def save_log(self):
+        recorder = self.tracker.recorder if self.tracker else None
+        if recorder:
+            self.tracker.stop_recording()
+            self.log(f"tracking data saved: {recorder.path.relative_to(ROOT)}, {recorder.path.stat().st_size / 1e6:.1f} MB")
+
     def stop_tracking(self):
         if self.tracker:
+            self.save_log()
             self.tracker.stop()
             self.tracker = None
             self.log("tracking stopped")
@@ -888,6 +919,7 @@ class Hub(QMainWindow):
         for key, index in (("X", 0), ("Y", 1), ("Z", 2)):
             self.track_values[key].setText(f"{position[index]:.1f}" if position is not None else "-")
         self.track_values["Rate"].setText(f"{tracker.rate:.0f}" if tracker else "-")
+        self.track_values["Age"].setText(f"{tracker.age:.0f}" if tracker and tracker.age is not None else "-")
         self.track_values["State"].setText({"still": "standing", "moving": "moving"}.get(tracker.motion, "-") if tracker else "-")
         self.auto_button.setEnabled(bool(tracker and tracker.chosen))
         if tracker:
@@ -906,6 +938,12 @@ class Hub(QMainWindow):
                                     f"{self.settings['unreal_address']}:{self.settings['moverse_port']}")
         else:
             self.track_info.setText("Stopped. Moverse must not run at the same time (both would send to the same port).")
+        watch = tracker.agreement if tracker else {}
+        self.agreement_line.setText(
+            ("Calibration watch (degrees each camera points beside the others, last 30 s; above "
+             f"{tracking.WATCH_DEGREES:.1f}: moved?): " + "  |  ".join(
+                f"{n}: {m:.2f}" + (" MOVED? calibrate again" if n in tracker.moved else "") for n, m in sorted(watch.items())))
+            if watch else "")
         self.track_button.setText("Stop tracking" if tracker else "Start tracking")
         set_variant(self.track_button, "stop" if tracker else "primary")
 
