@@ -1,10 +1,18 @@
 r"""Brings this folder's code (everything of TrackingPC in Git: hub, tools, scripts, MRLabHub.exe) to a
-version from GitHub, in one go. Close the hub first. In the TrackingPC folder:
+version from GitHub, in one go. Usually started by double-clicking update.bat (GUIDE.md, section 1); or,
+in the TrackingPC folder:
     runtime\python\python.exe tools\update.py            the newest version
     runtime\python\python.exe tools\update.py b09109f    a given version (a commit)
-Downloads every file into runtime\temp\update\ first; only when all arrived are the changed ones copied
-over the old ones. runtime\, hub.local.json and the recordings are not in Git and stay untouched. Files
-here that the version does not have are listed and kept. Only standard Python, no Git needed.
+
+Only this folder is changed:
+- it runs only from tools\ of a TrackingPC folder (next to MRLabHub.exe and hub\), and every file it writes
+  must lie inside that folder (checked before writing);
+- runtime\, hub.local.json and the recordings are never written (they are not in Git anyway);
+- everything is downloaded into runtime\temp\update\ first; then it checks that every file to replace can be
+  written (MRLabHub.exe cannot while the hub runs); only then are the changed files copied over the old
+  ones. If anything fails before that, nothing is changed. Files here that the version does not have are
+  listed and kept (nothing is deleted).
+Only standard Python, no Git needed.
 """
 import json
 import pathlib
@@ -15,7 +23,9 @@ import urllib.request
 REPO = "MatteoWood/MRLab-Agent"
 FOLDER = "TrackingPC"
 HERE = pathlib.Path(__file__).resolve().parent.parent  # the TrackingPC folder
+STAGE = HERE / "runtime" / "temp" / "update"
 LFS = b"version https://git-lfs.github.com/spec/v1"   # start of a Git LFS pointer (e.g. hub/icon.png)
+NEVER = ("runtime", "recordings")                      # top-level folders never written
 
 
 def fetch(url):
@@ -35,7 +45,62 @@ def listing(path, ref):
     return files
 
 
+def inside(relative):
+    """The file's place in this folder, or None if it would lie outside it or in a folder never written."""
+    target = (HERE / relative).resolve()
+    if HERE not in target.parents or target.parts[len(HERE.parts)].lower().startswith(NEVER) \
+            or target.name.lower().endswith(".local.json"):
+        return None
+    return target
+
+
+def same(target, copy):
+    """Whether the file here equals the downloaded one (a file that cannot be read counts as different)."""
+    try:
+        return target.is_file() and target.read_bytes() == copy.read_bytes()
+    except OSError:
+        return False
+
+
+def update(sha):
+    """Downloads the version into STAGE, then replaces the changed files; ({target: copy}, [changed targets])."""
+    files = {}  # target in this folder -> downloaded copy
+    try:
+        for path in listing(FOLDER, sha):
+            relative = pathlib.PurePosixPath(path).relative_to(FOLDER)
+            target = inside(relative)
+            if target is None:
+                print(f"  skipped {relative}: not to be written by an update")
+                continue
+            data = fetch(f"https://raw.githubusercontent.com/{REPO}/{sha}/{path}")
+            if data.startswith(LFS):
+                data = fetch(f"https://media.githubusercontent.com/media/{REPO}/{sha}/{path}")
+            if path.endswith((".bat", ".ps1")):  # Windows line ends, as Git checks them out (.gitattributes)
+                data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+            copy = STAGE / relative
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_bytes(data)
+            files[target] = copy
+    except Exception as error:
+        sys.exit(f"Download failed ({error}). Nothing was changed.")
+    changed = [t for t, c in files.items() if not same(t, c)]
+    for target in changed:  # all replaceable before the first one is replaced
+        try:
+            if target.exists():
+                with open(target, "r+b"):
+                    pass
+        except OSError:
+            sys.exit(f"{target.relative_to(HERE)} cannot be replaced: is the hub (MRLabHub) still open? Close it and "
+                     "run the update again. Nothing was changed.")
+    for target in changed:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(files[target], target)
+    return files, changed
+
+
 def main():
+    if not ((HERE / "MRLabHub.exe").is_file() and (HERE / "hub").is_dir()):
+        sys.exit(f"{HERE} is not the TrackingPC folder (no MRLabHub.exe and hub folder): nothing was changed.")
     wanted = sys.argv[1] if len(sys.argv) > 1 else "main"
     try:
         commit = json.loads(fetch(f"https://api.github.com/repos/{REPO}/commits/{wanted}"))
@@ -43,39 +108,16 @@ def main():
         sys.exit(f"Could not reach GitHub or find version '{wanted}': {error}. Nothing was changed.")
     sha = commit["sha"]
     print(f"Version {sha[:7]} of {commit['commit']['committer']['date'][:10]}: {commit['commit']['message'].splitlines()[0]}")
-    stage = HERE / "runtime" / "temp" / "update"
-    shutil.rmtree(stage, ignore_errors=True)
+    shutil.rmtree(STAGE, ignore_errors=True)
     try:
-        paths = listing(FOLDER, sha)
-        for path in paths:
-            data = fetch(f"https://raw.githubusercontent.com/{REPO}/{sha}/{path}")
-            if data.startswith(LFS):
-                data = fetch(f"https://media.githubusercontent.com/media/{REPO}/{sha}/{path}")
-            if path.endswith((".bat", ".ps1")):  # Windows line ends, as Git checks them out (.gitattributes)
-                data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-            target = stage / path[len(FOLDER) + 1:]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-    except Exception as error:
-        shutil.rmtree(stage, ignore_errors=True)
-        sys.exit(f"Download failed ({error}). Nothing was changed.")
-    changed = []
-    for source in sorted(p for p in stage.rglob("*") if p.is_file()):
-        relative = source.relative_to(stage)
-        target = HERE / relative
-        if target.exists() and target.read_bytes() == source.read_bytes():
-            continue
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-        except PermissionError:
-            sys.exit(f"Could not replace {relative}: is the hub still open? Close it and run this again.")
-        changed.append(str(relative))
-    shutil.rmtree(stage, ignore_errors=True)
-    known = {pathlib.Path(p[len(FOLDER) + 1:]) for p in paths}
+        files, changed = update(sha)
+    finally:
+        shutil.rmtree(STAGE, ignore_errors=True)
+    names = sorted(str(t.relative_to(HERE)) for t in changed)
+    print(f"{len(changed)} of {len(files)} files changed" + (":\n  " + "\n  ".join(names) if names else ": already up to date."))
+    known = {t.relative_to(HERE) for t in files}
     extra = sorted(str(p.relative_to(HERE)) for folder in ("hub", "tools") for p in (HERE / folder).rglob("*.py")
                    if p.relative_to(HERE) not in known and "__pycache__" not in p.parts)
-    print(f"{len(changed)} of {len(paths)} files changed" + (":\n  " + "\n  ".join(changed) if changed else "."))
     if extra:
         print("Not in this version (kept): " + ", ".join(extra))
 

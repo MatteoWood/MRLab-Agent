@@ -9,7 +9,7 @@ the people in front of the wall for Frank. Main README: section 4.12 (vision) an
 ## Two parts
 | Part | Where | Changes |
 |---|---|---|
-| Code: `MRLabHub.exe`, `hub\`, `launcher\`, `tools\`, scripts | Git (this folder) | often; `tools\update.py` brings all of it to a version (GUIDE.md, 1) |
+| Code: `MRLabHub.exe`, `hub\`, `launcher\`, `tools\`, scripts | Git (this folder) | often; double-click `update.bat` (GUIDE.md, 1) |
 | `runtime\`: portable Python with its packages (incl. ONNX Runtime), Ollama, the vision model, the tracking model (`pc_models\yolo11n-pose.onnx`), the lab defaults (`defaults.json`: Unreal PC address and Moverse port); about 6.8 GB | USB stick, not in Git | once |
 
 The hub only runs when both are together: `runtime\` must sit next to `MRLabHub.exe`.
@@ -127,7 +127,7 @@ The hub sends the same packets as Moverse (same format, same port), so check, in
 | `hub\space.py`, `hub\led_wall.json` | The 3D view; the wall's panel edges in tracking space |
 | `tools\led_wall_from_fbx.py` | Makes `led_wall.json` from the lab's `LEDWall.fbx` (run again if the wall model changes) |
 | `GUIDE.md` | How to use the hub and the tools, step by step |
-| `tools\update.py` | Brings this folder's code to a version from GitHub (GUIDE.md, 1) |
+| `update.bat`, `tools\update.py` | Double-click: brings this folder's code to the newest version from GitHub; writes only inside this folder, never `runtime\`, settings or recordings; nothing changed if the hub is open or the download fails (GUIDE.md, 1) |
 | `tools\pose_pass.py`, `tools\replay_calibration.py`, `tools\replay_tracking.py`, `tools\test_person.py`, `tools\live_test.py`, `tools\replay.py`, `tools\fakecams\` | Tests on the laptop with recordings and tracking logs (GUIDE.md, 9) |
 | `..\Tools\udp_listen.py` (project folder) | On the Unreal PC: do the hub's packets arrive (GUIDE.md, 7) |
 | `hub\vision.py` | Description of the people with the local model, sent to Unreal |

@@ -10,24 +10,24 @@ What is where:
 
 ## 1. Update the tracking PC
 
-Close the hub first.
+Close MRLabHub, then **double-click `update.bat`** in the TrackingPC folder. The window asks you to press a
+key, then shows the version it brought (a short code like `86aae77`, its date and what changed) and the
+files it replaced. Press a key to close it. That is all.
 
-The first time only, get the update tool:
+What it does and does not touch:
+- It changes files only inside this folder: it checks every file's place before writing, and refuses to run
+  if it is not in a TrackingPC folder (next to `MRLabHub.exe` and `hub`). Nothing else on the PC changes.
+- It never writes `runtime`, your settings (`hub.local.json`) or the recordings, and deletes nothing.
+- It downloads everything first. If the download fails, or the hub is still open (its files cannot be
+  replaced then), it says so and nothing is changed.
+
+The first time only, `update.bat` is not there yet. Open the black window in the TrackingPC folder and run:
 
 ```bat
-curl -L --create-dirs -o tools\update.py https://raw.githubusercontent.com/MatteoWood/MRLab-Agent/main/TrackingPC/tools/update.py
+curl -L -o update.bat https://raw.githubusercontent.com/MatteoWood/MRLab-Agent/main/TrackingPC/update.bat
 ```
 
-Then, every time Claude says there is a new version:
-
-```bat
-runtime\python\python.exe tools\update.py
-```
-
-It shows the version (a short code like `b09109f`, its date and what changed) and the files it replaced.
-Nothing is changed if the download fails. A given version instead of the newest: add its code at the end,
-for example `runtime\python\python.exe tools\update.py b09109f`. Your settings (`hub.local.json`), the
-`runtime` folder and the recordings are never touched.
+Then double-click it. To bring a given version instead of the newest, in the black window: `update.bat 86aae77`.
 
 ## 2. Start the hub
 
