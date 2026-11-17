@@ -1,6 +1,6 @@
 {
   "_about": "Frank's emotions and face expressions (README 4.14, Step 9B), read by UMRLabBehaviorComponent at BeginPlay. Recipes: MetaHuman face controls (CTRL_expressions_*) at full activation, seeded from Epic's facial poses (/MetaHumanCharacter/Optional/Animation/TemplateAnimations/Facial_Poses) and action units; strength scales all of them.",
-  "strength": 0.5,
+  "strength": 0.75,
   "rise_seconds": 0.5,
   "fall_seconds": 1.2,
   "flash_seconds": 0.2,
