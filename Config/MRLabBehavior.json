@@ -88,5 +88,35 @@
     "unsure": { "mood": 19, "intensity": 0.4, "valence": 0 },
     "surprised": { "mood": 5, "intensity": 0.5, "valence": 0 },
     "serious": { "mood": 2, "intensity": 0.3, "valence": -0.3 }
+  },
+  "turns": {
+    "_about": "Who speaks, for gaze and blinks (README 4.10). Frank's voice from the lip sync's mouth weight; the visitor from the loudness of the audio sent (microphone or test input), counted only after Frank has been silent echo_guard_seconds (no echo cancellation, Q24).",
+    "frank_voice_weight": 0.3, "visitor_threshold": 0.02, "echo_guard_seconds": 0.4, "min_visitor_speech": 0.15,
+    "visitor_end_seconds": 0.7, "visitor_end_quick": 0.25, "frank_end_seconds": 0.6, "frank_end_quick": 0.2,
+    "phrase_pause_seconds": 0.25, "yield_max_seconds": 5.0, "conversation_seconds": 15.0
+  },
+  "gaze": {
+    "_about": "Where Frank looks (README 4.10, D90). Points are (forward, left, up) in cm from his feet; ranges are [min, max] seconds unless named degrees. eye_degrees: measured eye rotation per eye look curve at 0.25, 0.5, 0.75, 1.0 (+ right / up), and each eye's rest direction, in the head bone's frame.",
+    "own_points": [[500, 80, 170], [500, -120, 150], [150, 30, 0], [100, -60, 0], [60, 300, 160], [60, -300, 170], [200, 0, 290], [25, 0, 95]],
+    "fallback_point": [300, 0, 172],
+    "own_fixation": [2, 6], "glance_interval": [8, 20], "glance_length": [0.5, 2], "notice_delay": [0.2, 0.5],
+    "close_distance": 460, "fast_speed": 50,
+    "listen_aversion_every": 7.0, "listen_aversion_length": 1.1, "speak_aversion_every": 4.8, "speak_aversion_length": 2.0,
+    "aversion_degrees": [8, 15], "phrase_start_avert": 0.5, "phrase_avert_length": [1, 2],
+    "think_delay": 0.6, "think_after_voice": [0.3, 1.3], "yield_hold": [3, 5],
+    "pause_glance_every": [3, 6], "pause_glance_length": [0.5, 1.5], "scan_every": [0.5, 2],
+    "head_join_degrees": 20, "head_delay": 0.05, "head_seconds": 0.35,
+    "eye_degrees": {
+      "_about": "Measured 2026-11-17 (Simulate, PreviewFaceControl, FACIAL_L_Eye / FACIAL_R_Eye local Z against the head bone): linear, each curve moves only its own eye; eyeParallelLookDirection changes nothing.",
+      "L": { "neutral": [0, 0], "right": [9.39, 18.78, 28.17, 37.56], "left": [-10.57, -21.13, -31.70, -42.26], "up": [7.42, 14.84, 22.26, 29.68], "down": [-9.97, -19.93, -29.90, -39.87] },
+      "R": { "neutral": [0, 0], "right": [10.62, 21.24, 31.85, 42.47], "left": [-9.38, -18.76, -28.13, -37.51], "up": [7.41, 14.81, 22.22, 29.62], "down": [-9.97, -19.95, -29.92, -39.90] }
+    }
+  },
+  "blinks": {
+    "_about": "Frank's own blinks on top of the lip sync model's (README 4.10): per minute at rest and speaking, x (1 + arousal_gain x arousal); with gaze shifts above shift_degrees; a long blink as 'understood' after a visitor turn; never within model_guard seconds of another blink.",
+    "rest_per_minute": 17, "speaking_per_minute": 26, "min_interval": 1.0,
+    "close_seconds": 0.07, "open_seconds": 0.18, "long_closed": [0.4, 0.6],
+    "shift_degrees": 25, "shift_probability": 0.5, "understood_probability": 0.3, "understood_min_turn": 2.0,
+    "model_guard": 0.4, "wait_for_pause": 0.5, "arousal_gain": 0.3
   }
 }

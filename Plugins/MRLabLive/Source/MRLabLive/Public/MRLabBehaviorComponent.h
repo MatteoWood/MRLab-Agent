@@ -2,17 +2,22 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "MRLabGaze.h"
 #include "MRLabBehaviorComponent.generated.h"
 
 class UMRLabLiveSession;
+class USceneComponent;
+class USkeletalMeshComponent;
 struct FMRLabDecision;
 
 /**
- * Frank's emotions and face expressions (README 4.14, Step 9B). Reads the Decisions answers of the Live session on the
- * same actor: the visitor's words move fast emotions (amused, concerned, annoyed, ...) through gates for freshness,
- * confirmation and reversals; Frank's own delivery sets the lip sync mood at the moment his words are heard. The
- * expression layer turns the emotions into MetaHuman face controls, which the MRLab Face animation node adds to the
- * lip sync. All numbers come from Config/MRLabBehavior.json, read at BeginPlay.
+ * Frank's emotions, face expressions, eyes and blinks (README 4.10, 4.14; Steps 9B, 9C). Reads the Decisions answers of
+ * the Live session on the same actor: the visitor's words move fast emotions (amused, concerned, annoyed, ...) through
+ * gates for freshness, confirmation and reversals; Frank's own delivery sets the lip sync mood at the moment his words
+ * are heard. The expression layer turns the emotions into MetaHuman face controls, which the MRLab Face animation node
+ * adds to the lip sync. Who speaks (voice, microphone level) drives where he looks (the tracked visitor of NDC_Basic,
+ * read only, or his own business) and when he blinks; the eye and blink controls go through the same node, the head
+ * target into the body post-process AnimBP. All numbers come from Config/MRLabBehavior.json, read at BeginPlay.
  */
 UCLASS(ClassGroup = (MRLab), meta = (BlueprintSpawnableComponent))
 class MRLABLIVE_API UMRLabBehaviorComponent : public UActorComponent
@@ -31,8 +36,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "MRLab Behaviour")
 	void PreviewExpression(FName Category, float Activation);
 
+	/** Tests: hold one face control at a value (the eye curves stop following the gaze while any is held, and the head
+	 * target is not written); None releases all. */
+	UFUNCTION(BlueprintCallable, Category = "MRLab Behaviour")
+	void PreviewFaceControl(FName Control, float Value);
+
 	/** The face controls the expression layer adds now, already weighted for speaking. Game thread (MRLab Face node). */
 	const TArray<TPair<FName, float>>& GetFaceCurves() const { return FaceCurves; }
+	/** Face controls that replace the lip sync's: the eye look curves (and held test controls). */
+	const TArray<TPair<FName, float>>& GetOverrideCurves() const { return OverrideCurves; }
+	/** Blink controls; the node takes the larger of these and the lip sync's. */
+	const TArray<TPair<FName, float>>& GetBlinkCurves() const { return BlinkCurves; }
 
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -61,6 +75,7 @@ private:
 		float Intensity = 0.f;
 		FName Category;       // expression category, or None
 		float Value = 0.f;
+		bool bTurnFinal = false; // Decisions said these are the last words of his turn
 		FString Text;
 	};
 	struct FCandidate // a reaction waiting for confirmation by the next fragment
@@ -79,6 +94,8 @@ private:
 	void WriteTrace(float Speaking);
 	FCategory* FindCategory(FName Name);
 	float GroupWeight(FName Control, float Speaking) const;
+	void FindParts();
+	void UpdateEyes(float DeltaTime, float Speaking);
 
 	TWeakObjectPtr<UMRLabLiveSession> Session;
 	FDelegateHandle DecisionHandle;
@@ -125,6 +142,28 @@ private:
 	float PreviewActivation = 0.f;
 
 	TArray<TPair<FName, float>> FaceCurves;
+
+	// Eyes and blinks (9C).
+	FMRLabTurns Turns;
+	FMRLabGaze Gaze;
+	FMRLabBlinks Blinks;
+	EMRLabTurn LoggedTurn = EMRLabTurn::Outside;
+	double TurnDoneAt = 0.0;  // latest visitor decision saying their turn is done or asks Frank
+	double TurnFinalAt = 0.0; // when the words Decisions marked as the end of Frank's turn were heard
+	TWeakObjectPtr<AActor> Ndc;
+	TWeakObjectPtr<USceneComponent> Rig;
+	TWeakObjectPtr<USkeletalMeshComponent> FaceMesh;
+	TWeakObjectPtr<USkeletalMeshComponent> BodyMesh;
+	double NextPartSearch = 0.0;
+	TMap<FName, float> PreviewControls;
+	TArray<TPair<FName, float>> OverrideCurves;
+	TArray<TPair<FName, float>> BlinkCurves;
+	double GazeCost = 0.0;
+	int32 GazeTicks = 0;
+	float TraceVisitorAngle = -1.f; // degrees between where the eyes look and the visitor point, seen from the eyes
+	float TraceVisitorDistance = 0.f;
+	float TraceModelBlink = 0.f;
+	bool bTraceTracked = false;
 
 	TUniquePtr<FArchive> TraceFile;
 	double TraceStart = 0.0;

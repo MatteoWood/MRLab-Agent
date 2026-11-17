@@ -1133,6 +1133,20 @@ void UMRLabLiveSession::StartMicrophone()
 	UE_LOG(LogMRLabLive, Log, TEXT("Microphone open: %d Hz, %d channels"), MicRate, MicChannels);
 }
 
+namespace
+{
+	float PcmRms(const int16* Pcm, int32 Num)
+	{
+		double Sum = 0.0;
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			const double Value = Pcm[Index] / 32768.0;
+			Sum += Value * Value;
+		}
+		return Num > 0 ? float(FMath::Sqrt(Sum / Num)) : 0.f;
+	}
+}
+
 void UMRLabLiveSession::StartReplay()
 {
 	const FString Path = ReplayFolder / TEXT("events.jsonl");
@@ -1143,15 +1157,26 @@ void UMRLabLiveSession::StartReplay()
 		return;
 	}
 	ReplayEvents.Reset();
+	ReplayLevels.Reset();
 	for (const FString& Line : Lines)
 	{
 		TSharedPtr<FJsonObject> Entry;
-		if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Line), Entry) || !Entry.IsValid()
-			|| Entry->GetStringField(TEXT("d")) != TEXT("in"))
+		if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Line), Entry) || !Entry.IsValid())
 		{
 			continue;
 		}
 		const TSharedPtr<FJsonObject> Message = Entry->GetObjectField(TEXT("m"));
+		if (Entry->GetStringField(TEXT("d")) != TEXT("in"))
+		{
+			// The visitor audio that was sent: only its loudness is replayed (VisitorLevel).
+			if (Message->GetStringField(TEXT("type")) == TEXT("session.input_audio.append"))
+			{
+				TArray<uint8> Bytes;
+				FBase64::Decode(Message->GetStringField(TEXT("audio")), Bytes);
+				ReplayLevels.Emplace(Entry->GetNumberField(TEXT("t")), PcmRms(reinterpret_cast<const int16*>(Bytes.GetData()), Bytes.Num() / 2));
+			}
+			continue;
+		}
 		if (Message->GetStringField(TEXT("type")) == TEXT("session.started"))
 		{
 			continue; // would open the microphone and the camera socket
@@ -1165,6 +1190,7 @@ void UMRLabLiveSession::StartReplay()
 	bReplaying = true;
 	bStarted = true;
 	ReplayNext = 0;
+	ReplayLevelNext = 0;
 	ReplayStart = FPlatformTime::Seconds();
 	StartVoice();
 }
@@ -1242,6 +1268,10 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 		{
 			HandleMessage(ReplayEvents[ReplayNext++].Value);
 		}
+		while (ReplayLevelNext < ReplayLevels.Num() && ReplayLevels[ReplayLevelNext].Key <= Elapsed)
+		{
+			VisitorLevel = ReplayLevels[ReplayLevelNext++].Value;
+		}
 		UpdateLipSync();
 		if (ReplayNext >= ReplayEvents.Num() && (ReplayEvents.Num() == 0 || Elapsed > ReplayEvents.Last().Key + 2.0))
 		{
@@ -1279,6 +1309,7 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	}
 	if (Pcm.Num() > 0)
 	{
+		VisitorLevel = PcmRms(Pcm.GetData(), Pcm.Num());
 		TSharedRef<FJsonObject> Event = MakeShared<FJsonObject>();
 		Event->SetStringField(TEXT("type"), TEXT("session.input_audio.append"));
 		Event->SetStringField(TEXT("audio"), FBase64::Encode(reinterpret_cast<const uint8*>(Pcm.GetData()), Pcm.Num() * sizeof(int16)));
@@ -1297,6 +1328,8 @@ void UMRLabLiveSession::Shutdown(const FString& Reason)
 	bStarted = false;
 	bReplaying = false;
 	ReplayEvents.Reset();
+	ReplayLevels.Reset();
+	VisitorLevel = 0.f;
 	bTestInput = false;
 	TestPcm.Reset();
 	if (DecisionCount > 0)

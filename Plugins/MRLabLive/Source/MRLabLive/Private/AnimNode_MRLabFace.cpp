@@ -33,7 +33,8 @@ void FAnimNode_MRLabFace::PreUpdate(const UAnimInstance* InAnimInstance)
 		bSearched = true;
 	}
 
-	// Lip sync as solved for the sample heard now; the expression layer added on top, clamped (README 4.14).
+	// Lip sync as solved for the sample heard now; the expression layer added on top, clamped (README 4.14); the eye
+	// look curves replace the lip sync's (they are 0 there), blinks take the larger value (README 4.10).
 	TMap<FName, float> Merged;
 	if (const UMRLabLiveSession* Live = Session.Get())
 	{
@@ -45,6 +46,15 @@ void FAnimNode_MRLabFace::PreUpdate(const UAnimInstance* InAnimInstance)
 		{
 			float& Value = Merged.FindOrAdd(Control.Key);
 			Value = FMath::Clamp(Value + Control.Value, 0.f, 1.f);
+		}
+		for (const TPair<FName, float>& Control : Layer->GetOverrideCurves())
+		{
+			Merged.Add(Control.Key, FMath::Clamp(Control.Value, 0.f, 1.f));
+		}
+		for (const TPair<FName, float>& Control : Layer->GetBlinkCurves())
+		{
+			float& Value = Merged.FindOrAdd(Control.Key);
+			Value = FMath::Max(Value, FMath::Clamp(Control.Value, 0.f, 1.f));
 		}
 	}
 	Curves = Merged.Array();

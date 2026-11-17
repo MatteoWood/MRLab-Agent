@@ -107,8 +107,17 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "MRLab Live")
 	float SpeakingWeight = 0.f;
 
+	/** Loudness (RMS, 0 to 1) of the visitor audio sent in the latest tick: the microphone, the test input, or in a
+	 * replay the recorded input. The microphone also hears Frank's voice (no echo cancellation, Q24). */
+	UPROPERTY(BlueprintReadOnly, Category = "MRLab Live")
+	float VisitorLevel = 0.f;
+
 	/** Every completed decision, parsed, on the game thread (C++ only). */
 	FMRLabOnDecision OnDecision;
+
+	/** FPlatformTime::Seconds() of the latest transcript fragment of the visitor / of Frank (0 before the first). */
+	double LastVisitorFragmentTime() const { return LastUserDelta; }
+	double LastFrankFragmentTime() const { return LastAgentFragment; }
 
 	/** The voice sample (24 kHz, counted from the session start) being heard now. */
 	int64 VoicePlayhead() const { return Playhead; }
@@ -244,6 +253,8 @@ private:
 
 	// Replay (ReplayFolder): received messages with their time since session start.
 	TArray<TPair<double, FString>> ReplayEvents;
+	TArray<TPair<double, float>> ReplayLevels; // recorded visitor audio: time, RMS
+	int32 ReplayLevelNext = 0;
 	int32 ReplayNext = 0;
 	double ReplayStart = 0.0;
 	bool bReplaying = false;

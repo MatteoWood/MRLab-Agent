@@ -1,6 +1,9 @@
 #include "MRLabBehaviorComponent.h"
 
+#include "Animation/AnimInstance.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Dom/JsonObject.h"
+#include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
@@ -28,6 +31,26 @@ namespace
 	{
 		double Value = Default;
 		return Object.IsValid() && Object->TryGetNumberField(Field, Value) ? float(Value) : Default;
+	}
+
+	const FName FaceName(TEXT("Face"));
+	const FName BodyName(TEXT("Body"));
+	const FName RigName(TEXT("Rig"));
+	const FName HeadBone(TEXT("head"));
+	const FName EyeBones[2] = { FName(TEXT("FACIAL_L_Eye")), FName(TEXT("FACIAL_R_Eye")) };
+	const FName BlinkCurveNames[2] = { FName(TEXT("CTRL_expressions_eyeBlinkL")), FName(TEXT("CTRL_expressions_eyeBlinkR")) };
+
+	const TCHAR* GazeKindName(FMRLabGaze::EKind Kind)
+	{
+		switch (Kind)
+		{
+		case FMRLabGaze::EKind::Visitor: return TEXT("visitor");
+		case FMRLabGaze::EKind::Own: return TEXT("own");
+		case FMRLabGaze::EKind::Aversion: return TEXT("aversion");
+		case FMRLabGaze::EKind::Thinking: return TEXT("thinking");
+		case FMRLabGaze::EKind::Glance: return TEXT("glance");
+		}
+		return TEXT("?");
 	}
 }
 
@@ -181,9 +204,22 @@ bool UMRLabBehaviorComponent::LoadSettings()
 		}
 	}
 
+	if (Root->TryGetObjectField(TEXT("turns"), Object))
+	{
+		Turns.Load(*Object);
+	}
+	if (Root->TryGetObjectField(TEXT("gaze"), Object))
+	{
+		Gaze.Load(*Object);
+	}
+	if (Root->TryGetObjectField(TEXT("blinks"), Object))
+	{
+		Blinks.Load(*Object);
+	}
+
 	bLoaded = true;
-	UE_LOG(LogMRLabBehavior, Log, TEXT("Behaviour: %d expression categories, %d baseline controls, strength %.2f, explicit moods %s (%s)"),
-		Categories.Num(), Baseline.Num(), Strength, bExplicitMoods ? TEXT("on") : TEXT("off"), *Path);
+	UE_LOG(LogMRLabBehavior, Log, TEXT("Behaviour: %d expression categories, %d baseline controls, strength %.2f, explicit moods %s, %d own gaze points (%s)"),
+		Categories.Num(), Baseline.Num(), Strength, bExplicitMoods ? TEXT("on") : TEXT("off"), Gaze.OwnPoints.Num(), *Path);
 	return true;
 }
 
@@ -201,6 +237,57 @@ void UMRLabBehaviorComponent::BeginPlay()
 	{
 		UE_LOG(LogMRLabBehavior, Warning, TEXT("No MRLab Live session on %s: the face shows only its baseline"), *GetNameSafe(GetOwner()));
 	}
+	FindParts();
+}
+
+void UMRLabBehaviorComponent::FindParts()
+{
+	AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return;
+	}
+	if (!FaceMesh.IsValid() || !BodyMesh.IsValid())
+	{
+		TArray<USkeletalMeshComponent*> Meshes;
+		Owner->GetComponents(Meshes);
+		for (USkeletalMeshComponent* Mesh : Meshes)
+		{
+			const bool bFace = Mesh->GetFName() == FaceName;
+			if (!bFace && Mesh->GetFName() != BodyName)
+			{
+				continue;
+			}
+			TWeakObjectPtr<USkeletalMeshComponent>& Slot = bFace ? FaceMesh : BodyMesh;
+			if (!Slot.IsValid())
+			{
+				Slot = Mesh;
+				// Its animation updates after this component has written the eye, blink and head values.
+				Mesh->AddTickPrerequisiteComponent(this);
+			}
+		}
+	}
+	if (!Ndc.IsValid() && GetWorld())
+	{
+		for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+		{
+			if (It->GetClass()->GetName().StartsWith(TEXT("NDC_Basic")))
+			{
+				TArray<USceneComponent*> Parts;
+				It->GetComponents(Parts);
+				for (USceneComponent* Part : Parts)
+				{
+					if (Part->GetFName() == RigName)
+					{
+						Rig = Part;
+					}
+				}
+				Ndc = *It;
+				UE_LOG(LogMRLabBehavior, Log, TEXT("Gaze: visitor head from %s (Rig %s)"), *It->GetName(), Rig.IsValid() ? TEXT("found") : TEXT("missing"));
+				break;
+			}
+		}
+	}
 }
 
 void UMRLabBehaviorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -208,6 +295,11 @@ void UMRLabBehaviorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (UMRLabLiveSession* Live = Session.Get())
 	{
 		Live->OnDecision.Remove(DecisionHandle);
+	}
+	if (GazeTicks > 0)
+	{
+		UE_LOG(LogMRLabBehavior, Log, TEXT("Eyes: %d updates, %.3f ms each; blinks: own %d, lip sync model %d"),
+			GazeTicks, GazeCost / GazeTicks * 1000.0, Blinks.OwnCount, Blinks.ModelCount);
 	}
 	TraceFile.Reset();
 	Super::EndPlay(EndPlayReason);
@@ -220,6 +312,16 @@ UMRLabBehaviorComponent::FCategory* UMRLabBehaviorComponent::FindCategory(FName 
 
 void UMRLabBehaviorComponent::HandleDecision(const FMRLabDecision& Decision)
 {
+	// Turn ends for the gaze (Appendix A thresholds).
+	if (Decision.bVisitor)
+	{
+		const FMRLabAnswer* Done = Decision.Find(TEXT("turn_done"));
+		const FMRLabAnswer* Asks = Decision.Find(TEXT("asks_frank"));
+		if ((Done && Done->Value >= 0.65f) || (Asks && Asks->Value >= 0.6f))
+		{
+			TurnDoneAt = FPlatformTime::Seconds();
+		}
+	}
 	if (Decision.bVisitor)
 	{
 		HandleVisitor(Decision);
@@ -305,13 +407,19 @@ void UMRLabBehaviorComponent::HandleVisitor(const FMRLabDecision& Decision)
 void UMRLabBehaviorComponent::HandleFrank(const FMRLabDecision& Decision)
 {
 	const FMRLabAnswer* Delivery = Decision.Find(TEXT("delivery"));
-	if (!Delivery)
+	const FMRLabAnswer* Final = Decision.Find(TEXT("turn_final"));
+	const bool bTurnFinal = Final && Final->Value >= 0.6f;
+	if (!Delivery || Delivery->Probability(Delivery->Choice) < MinProbability || Delivery->Confidence < MinConfidence)
 	{
-		return;
-	}
-	const float Probability = Delivery->Probability(Delivery->Choice);
-	if (Probability < MinProbability || Delivery->Confidence < MinConfidence)
-	{
+		if (bTurnFinal)
+		{
+			FScheduled Item;
+			Item.StartMs = Decision.StartMs;
+			Item.Created = FPlatformTime::Seconds();
+			Item.Text = Decision.Text;
+			Item.bTurnFinal = true;
+			Scheduled.Add(MoveTemp(Item));
+		}
 		return;
 	}
 	const FMRLabAnswer* StrengthAnswer = Decision.Find(TEXT("strength"));
@@ -330,6 +438,7 @@ void UMRLabBehaviorComponent::HandleFrank(const FMRLabDecision& Decision)
 	Item.StartMs = Decision.StartMs;
 	Item.Created = FPlatformTime::Seconds();
 	Item.Text = Decision.Text;
+	Item.bTurnFinal = bTurnFinal;
 	if (bExplicitMoods)
 	{
 		if (const TPair<int32, float>* Mood = DeliveryMoods.Find(Key))
@@ -343,7 +452,7 @@ void UMRLabBehaviorComponent::HandleFrank(const FMRLabDecision& Decision)
 		Item.Category = *Category;
 		Item.Value = FMath::Clamp(DeliveryStrength, 0.3f, 1.f);
 	}
-	if (Item.Mood >= 0 || !Item.Category.IsNone())
+	if (Item.Mood >= 0 || !Item.Category.IsNone() || Item.bTurnFinal)
 	{
 		Scheduled.Add(MoveTemp(Item));
 	}
@@ -399,6 +508,10 @@ void UMRLabBehaviorComponent::RunScheduled()
 		{
 			Apply(*Category, Item.Value * Category->Gain);
 		}
+		if (Item.bTurnFinal)
+		{
+			TurnFinalAt = Now;
+		}
 		Scheduled.RemoveAt(Index);
 	}
 }
@@ -415,6 +528,7 @@ void UMRLabBehaviorComponent::TickComponent(float DeltaTime, ELevelTick TickType
 	if (!PreviewCategory.IsNone())
 	{
 		UpdateFace(0.f);
+		UpdateEyes(DeltaTime, 0.f);
 		return;
 	}
 
@@ -451,7 +565,106 @@ void UMRLabBehaviorComponent::TickComponent(float DeltaTime, ELevelTick TickType
 	Arousal += (BaseArousal - Arousal) * Return;
 
 	UpdateFace(Speaking);
+	UpdateEyes(DeltaTime, Speaking);
 	WriteTrace(Speaking);
+}
+
+void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
+{
+	const double Now = FPlatformTime::Seconds();
+	if (Now >= NextPartSearch && (!FaceMesh.IsValid() || !BodyMesh.IsValid() || !Ndc.IsValid()))
+	{
+		NextPartSearch = Now + 1.0;
+		FindParts();
+	}
+	const UMRLabLiveSession* Live = Session.Get();
+	Turns.Update(Now, Speaking, Live ? Live->VisitorLevel : 0.f, TurnDoneAt, TurnFinalAt);
+	if (Turns.State != LoggedTurn)
+	{
+		UE_LOG(LogMRLabBehavior, Log, TEXT("Turn: %s -> %s"), MRLabTurnName(LoggedTurn), MRLabTurnName(Turns.State));
+		LoggedTurn = Turns.State;
+	}
+
+	OverrideCurves.Reset();
+	BlinkCurves.Reset();
+	USkeletalMeshComponent* Face = FaceMesh.Get();
+	if (!Face || Face->GetBoneIndex(EyeBones[0]) == INDEX_NONE || Face->GetBoneIndex(EyeBones[1]) == INDEX_NONE)
+	{
+		return;
+	}
+
+	FMRLabGazeInput In;
+	In.Now = Now;
+	In.DeltaTime = DeltaTime;
+	In.FrankForward = GetOwner()->GetActorRightVector().GetSafeNormal2D(); // his face looks along the actor's right vector
+	In.FrankFeet = GetOwner()->GetActorLocation();
+	In.Head = Face->GetSocketTransform(HeadBone);
+	In.EyeL = Face->GetSocketLocation(EyeBones[0]);
+	In.EyeR = Face->GetSocketLocation(EyeBones[1]);
+	if (const AActor* Tracker = Ndc.Get())
+	{
+		const FBoolProperty* Tracked = FindFProperty<FBoolProperty>(Tracker->GetClass(), TEXT("bHeadTracked"));
+		In.bTracked = Tracked && Tracked->GetPropertyValue_InContainer(Tracker) && Rig.IsValid();
+		if (In.bTracked)
+		{
+			In.Visitor = Rig->GetComponentLocation();
+		}
+	}
+	In.Turns = &Turns;
+	In.Arousal = Arousal;
+	In.Rapport = Rapport;
+	Gaze.Update(In);
+
+	TraceModelBlink = Live ? FMath::Max(Live->LipSyncCurves.FindRef(BlinkCurveNames[0]), Live->LipSyncCurves.FindRef(BlinkCurveNames[1])) : 0.f;
+	Blinks.Update(Now, Turns, Gaze, TraceModelBlink, Arousal);
+
+	const FVector Mid = (In.EyeL + In.EyeR) * 0.5;
+	bTraceTracked = In.bTracked;
+	TraceVisitorDistance = In.bTracked ? (In.Visitor - Mid).Size() : 0.f;
+	TraceVisitorAngle = In.bTracked ? FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(
+		(Gaze.GazePoint - Mid).GetSafeNormal(), (In.Visitor - Mid).GetSafeNormal()), -1.f, 1.f))) : -1.f;
+
+	if (PreviewControls.Num() > 0)
+	{
+		for (const TPair<FName, float>& Control : PreviewControls)
+		{
+			OverrideCurves.Emplace(Control.Key, Control.Value);
+		}
+	}
+	else
+	{
+		for (int32 Eye = 0; Eye < 2; ++Eye)
+		{
+			for (int32 Curve = 0; Curve < 4; ++Curve)
+			{
+				OverrideCurves.Emplace(Gaze.Eyes[Eye].Curves[Curve], Gaze.Curves[Eye][Curve]);
+			}
+			BlinkCurves.Emplace(BlinkCurveNames[Eye], Blinks.Value);
+		}
+		// Head target into the body post-process AnimBP (its Look At nodes), before its animation update.
+		USkeletalMeshComponent* Body = BodyMesh.Get();
+		UAnimInstance* Post = Body ? Body->GetPostProcessInstance() : nullptr;
+		const FStructProperty* Target = Post ? FindFProperty<FStructProperty>(Post->GetClass(), TEXT("HeadTarget")) : nullptr;
+		if (Target && Target->Struct == TBaseStructure<FVector>::Get() && Gaze.bHeadValid)
+		{
+			*Target->ContainerPtrToValuePtr<FVector>(Post) = Gaze.HeadTarget;
+		}
+	}
+	GazeCost += FPlatformTime::Seconds() - Now;
+	++GazeTicks;
+}
+
+void UMRLabBehaviorComponent::PreviewFaceControl(FName Control, float Value)
+{
+	if (Control.IsNone())
+	{
+		PreviewControls.Reset();
+	}
+	else
+	{
+		PreviewControls.Add(Control, FMath::Clamp(Value, 0.f, 1.f));
+	}
+	UE_LOG(LogMRLabBehavior, Log, TEXT("Preview control %s = %.2f (%d held)"), *Control.ToString(), Value, PreviewControls.Num());
 }
 
 float UMRLabBehaviorComponent::GroupWeight(FName Control, float Speaking) const
@@ -524,8 +737,14 @@ void UMRLabBehaviorComponent::WriteTrace(float Speaking)
 	}
 	TraceNext += TraceInterval;
 	const UMRLabLiveSession* Live = Session.Get();
-	FString Line = FString::Printf(TEXT("{\"t\":%.3f,\"speaking\":%.3f,\"playhead\":%lld,\"valence\":%.3f,\"arousal\":%.3f,\"rapport\":%.3f,\"mood\":%d,\"shown\":{"),
+	FString Line = FString::Printf(TEXT("{\"t\":%.3f,\"speaking\":%.3f,\"playhead\":%lld,\"valence\":%.3f,\"arousal\":%.3f,\"rapport\":%.3f,\"mood\":%d,"),
 		Now - TraceStart, Speaking, Live ? Live->VoicePlayhead() : 0LL, Valence, Arousal, Rapport, CurrentMood);
+	Line += FString::Printf(TEXT("\"turn\":\"%s\",\"vlevel\":%.4f,\"gaze\":\"%s\",\"tracked\":%d,\"vdist\":%.0f,\"vangle\":%.2f,\"eyes\":[[%.2f,%.2f],[%.2f,%.2f]],")
+		TEXT("\"curves\":[[%.3f,%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f,%.3f]],\"shift\":[%.3f,%.1f],\"blink\":%.3f,\"mblink\":%.3f,\"head\":[%.1f,%.1f,%.1f],\"shown\":{"),
+		MRLabTurnName(Turns.State), Live ? Live->VisitorLevel : 0.f, GazeKindName(Gaze.Kind), bTraceTracked ? 1 : 0, TraceVisitorDistance, TraceVisitorAngle,
+		Gaze.YawPitch[0][0], Gaze.YawPitch[0][1], Gaze.YawPitch[1][0], Gaze.YawPitch[1][1],
+		Gaze.Curves[0][0], Gaze.Curves[0][1], Gaze.Curves[0][2], Gaze.Curves[0][3], Gaze.Curves[1][0], Gaze.Curves[1][1], Gaze.Curves[1][2], Gaze.Curves[1][3],
+		Gaze.LastShiftAt - TraceStart, Gaze.LastShiftDegrees, Blinks.Value, TraceModelBlink, Gaze.HeadTarget.X, Gaze.HeadTarget.Y, Gaze.HeadTarget.Z);
 	bool bFirst = true;
 	for (const FCategory& Category : Categories)
 	{
