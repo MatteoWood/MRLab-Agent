@@ -239,6 +239,8 @@ void FMRLabGaze::Load(const TSharedPtr<FJsonObject>& Object)
 	AversionDegrees = Range(Object, TEXT("aversion_degrees"), AversionDegrees);
 	PhraseStartAvert = Num(Object, TEXT("phrase_start_avert"), PhraseStartAvert);
 	PhraseAvertLength = Range(Object, TEXT("phrase_avert_length"), PhraseAvertLength);
+	MinAversion = Num(Object, TEXT("min_aversion"), MinAversion);
+	ContinueSeconds = Num(Object, TEXT("continue_seconds"), ContinueSeconds);
 	ThinkDelay = Num(Object, TEXT("think_delay"), ThinkDelay);
 	ThinkAfterVoice = Range(Object, TEXT("think_after_voice"), ThinkAfterVoice);
 	YieldHold = Range(Object, TEXT("yield_hold"), YieldHold);
@@ -391,6 +393,10 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		NextGlance = Now + Rand(GlanceInterval);
 	}
 	const bool bTurnChanged = T.State != LastTurn;
+	if (bTurnChanged && LastTurn == EMRLabTurn::Speaking)
+	{
+		SpeakingEndedAt = Now;
+	}
 	LastTurn = T.State;
 
 	auto OnVisitor = [&](EKind NewKind, double NewUntil) { LookAt(In, NewKind, Visitor, true, NewUntil); };
@@ -400,6 +406,7 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		const float Yaw = bDown ? FMath::FRandRange(-4.f, 4.f) : Rand(AversionDegrees) * (FMath::RandBool() ? 1.f : -1.f);
 		const float Pitch = bDown ? -Rand(AversionDegrees) : FMath::FRandRange(-3.f, 3.f);
 		LookAt(In, EKind::Aversion, Offset(In, Visitor, Yaw, Pitch), false, Now + Length);
+		AvertStart = Now;
 	};
 
 	switch (T.State)
@@ -480,16 +487,22 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 	case EMRLabTurn::Speaking:
 		if (bTurnChanged)
 		{
+			// Back within ContinueSeconds (a sentence end inside an answer): the same turn, its timing goes on and
+			// the restart counts as a phrase start.
+			const bool bContinued = Now - SpeakingEndedAt < ContinueSeconds;
 			if (Kind == EKind::Thinking)
 			{
 				ThinkUntil = Now + Rand(ThinkAfterVoice);
 			}
-			else if (Kind != EKind::Visitor)
+			else if (Kind != EKind::Visitor && !(bContinued && Kind == EKind::Aversion))
 			{
 				OnVisitor(EKind::Visitor, Forever);
 			}
-			NextAversion = Now + Waiting(SpeakAversionEvery, 1.f);
-			LastPhraseSeen = T.PhraseStartAt;
+			if (!bContinued)
+			{
+				NextAversion = Now + Waiting(SpeakAversionEvery, 1.f);
+				LastPhraseSeen = T.PhraseStartAt;
+			}
 		}
 		if (Kind == EKind::Thinking)
 		{
@@ -512,8 +525,8 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		}
 		if (Kind == EKind::Aversion)
 		{
-			// Back on the visitor at a phrase end, or when the aversion is over.
-			if (Now >= Until || (!T.bFrankVoice && Now - T.FrankLastVoice >= 0.2))
+			// Back on the visitor at a phrase end (a pause as long as a phrase break), or when the aversion is over.
+			if (Now >= Until || (Now - AvertStart >= MinAversion && !T.bFrankVoice && Now - T.FrankLastVoice >= T.PhrasePauseSeconds))
 			{
 				OnVisitor(EKind::Visitor, Forever);
 			}

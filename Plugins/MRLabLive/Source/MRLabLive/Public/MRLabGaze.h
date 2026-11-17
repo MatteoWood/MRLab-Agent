@@ -100,6 +100,8 @@ struct FMRLabGaze
 	FVector2D AversionDegrees = { 8.f, 15.f };
 	float PhraseStartAvert = 0.5f;   // probability of looking away at a phrase start
 	FVector2D PhraseAvertLength = { 1.f, 2.f };
+	float MinAversion = 1.f;         // seconds an aversion lasts before a phrase end can end it
+	float ContinueSeconds = 1.5f;    // his voice back within this time after his turn seemed to end: the same turn
 	float ThinkDelay = 0.6f;         // Frank silent this long after the visitor's turn: thinking aversion
 	FVector2D ThinkAfterVoice = { 0.3f, 1.3f };
 	FVector2D YieldHold = { 3.f, 5.f };
@@ -141,6 +143,8 @@ private:
 	double NextScan = 0.0;
 	double NoticeAt = -1.0;
 	double ThinkUntil = -1.0;
+	double AvertStart = -1e9;
+	double SpeakingEndedAt = -1e9;   // when his last stretch of speaking ended
 	double LastPhraseSeen = -1e9;
 	int32 OwnIndex = -1;
 	bool bTrackVisitor = false;      // the target follows the visitor

@@ -93,7 +93,7 @@
     "_about": "Who speaks, for gaze and blinks (README 4.10). Frank's voice from the lip sync's mouth weight; the visitor from the loudness of the audio sent (microphone or test input), counted only after Frank has been silent echo_guard_seconds (no echo cancellation, Q24). Frank's turn ends after frank_end_quick of silence once the words Decisions marked turn_final were heard, else after frank_end_seconds: pauses inside his answers reach 1.7 s (replay, 2026-11-17).",
     "frank_voice_weight": 0.3, "visitor_threshold": 0.02, "echo_guard_seconds": 0.4, "min_visitor_speech": 0.15,
     "visitor_end_seconds": 0.7, "visitor_end_quick": 0.25, "frank_end_seconds": 2.0, "frank_end_quick": 0.2,
-    "phrase_pause_seconds": 0.25, "yield_max_seconds": 5.0, "conversation_seconds": 15.0
+    "phrase_pause_seconds": 0.35, "yield_max_seconds": 5.0, "conversation_seconds": 15.0
   },
   "gaze": {
     "_about": "Where Frank looks (README 4.10, D90). Points are (forward, left, up) in cm from his feet, within reach of eyes plus head (body still): at most about 40 deg to the side; ranges are [min, max] seconds unless named degrees. eye_degrees: measured eye rotation per eye look curve at 0.25, 0.5, 0.75, 1.0 (+ right / up), and each eye's rest direction, in the head bone's frame.",
@@ -102,7 +102,7 @@
     "own_fixation": [2, 6], "glance_interval": [8, 20], "glance_length": [0.5, 2], "notice_delay": [0.2, 0.5],
     "close_distance": 460, "fast_speed": 50,
     "listen_aversion_every": 7.0, "listen_aversion_length": 1.1, "speak_aversion_every": 4.8, "speak_aversion_length": 2.0,
-    "aversion_degrees": [8, 15], "phrase_start_avert": 0.5, "phrase_avert_length": [1, 2],
+    "aversion_degrees": [8, 15], "phrase_start_avert": 0.5, "phrase_avert_length": [1, 2], "min_aversion": 1.0, "continue_seconds": 1.5,
     "think_delay": 0.6, "think_after_voice": [0.3, 1.3], "yield_hold": [3, 5],
     "pause_glance_every": [3, 6], "pause_glance_length": [0.5, 1.5], "scan_every": [0.5, 2],
     "head_join_degrees": 20, "head_delay": 0.05, "head_seconds": 0.35,
