@@ -163,6 +163,7 @@ private:
 	float TraceVisitorAngle = -1.f; // degrees between where the eyes look and the visitor point, seen from the eyes
 	float TraceVisitorDistance = 0.f;
 	float TraceModelBlink = 0.f;
+	float TraceEyeError[2] = { -1.f, -1.f }; // degrees between each eye bone's look axis (last pose) and its gaze direction
 	bool bTraceTracked = false;
 
 	TUniquePtr<FArchive> TraceFile;

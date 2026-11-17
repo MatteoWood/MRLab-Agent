@@ -90,14 +90,14 @@
     "serious": { "mood": 2, "intensity": 0.3, "valence": -0.3 }
   },
   "turns": {
-    "_about": "Who speaks, for gaze and blinks (README 4.10). Frank's voice from the lip sync's mouth weight; the visitor from the loudness of the audio sent (microphone or test input), counted only after Frank has been silent echo_guard_seconds (no echo cancellation, Q24).",
+    "_about": "Who speaks, for gaze and blinks (README 4.10). Frank's voice from the lip sync's mouth weight; the visitor from the loudness of the audio sent (microphone or test input), counted only after Frank has been silent echo_guard_seconds (no echo cancellation, Q24). Frank's turn ends after frank_end_quick of silence once the words Decisions marked turn_final were heard, else after frank_end_seconds: pauses inside his answers reach 1.7 s (replay, 2026-11-17).",
     "frank_voice_weight": 0.3, "visitor_threshold": 0.02, "echo_guard_seconds": 0.4, "min_visitor_speech": 0.15,
-    "visitor_end_seconds": 0.7, "visitor_end_quick": 0.25, "frank_end_seconds": 0.6, "frank_end_quick": 0.2,
+    "visitor_end_seconds": 0.7, "visitor_end_quick": 0.25, "frank_end_seconds": 2.0, "frank_end_quick": 0.2,
     "phrase_pause_seconds": 0.25, "yield_max_seconds": 5.0, "conversation_seconds": 15.0
   },
   "gaze": {
-    "_about": "Where Frank looks (README 4.10, D90). Points are (forward, left, up) in cm from his feet; ranges are [min, max] seconds unless named degrees. eye_degrees: measured eye rotation per eye look curve at 0.25, 0.5, 0.75, 1.0 (+ right / up), and each eye's rest direction, in the head bone's frame.",
-    "own_points": [[500, 80, 170], [500, -120, 150], [150, 30, 0], [100, -60, 0], [60, 300, 160], [60, -300, 170], [200, 0, 290], [25, 0, 95]],
+    "_about": "Where Frank looks (README 4.10, D90). Points are (forward, left, up) in cm from his feet, within reach of eyes plus head (body still): at most about 40 deg to the side; ranges are [min, max] seconds unless named degrees. eye_degrees: measured eye rotation per eye look curve at 0.25, 0.5, 0.75, 1.0 (+ right / up), and each eye's rest direction, in the head bone's frame.",
+    "own_points": [[500, 150, 165], [500, -200, 150], [260, 40, 0], [220, -100, 0], [300, 220, 170], [300, -230, 160], [300, 40, 290], [70, 10, 70]],
     "fallback_point": [300, 0, 172],
     "own_fixation": [2, 6], "glance_interval": [8, 20], "glance_length": [0.5, 2], "notice_delay": [0.2, 0.5],
     "close_distance": 460, "fast_speed": 50,

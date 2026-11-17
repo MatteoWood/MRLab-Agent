@@ -449,12 +449,17 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		}
 		else if (Now >= NextAversion)
 		{
-			// Vetoes: not in the first second of their turn, not in a silence that may end it.
+			// Vetoes: not in the first second of their turn, not in a silence that may end it; a vetoed aversion
+			// is tried again shortly.
 			if (Now - T.VisitorTurnStart >= 1.0 && Now - T.VisitorLastVoice < 0.25)
 			{
 				Avert(FMath::Clamp(ListenAversionLength + 0.3f * FMath::FRandRange(-1.f, 1.f), 0.6f, 2.f));
+				NextAversion = Now + Waiting(ListenAversionEvery * (1.f + In.Rapport), 1.f);
 			}
-			NextAversion = Now + Waiting(ListenAversionEvery * (1.f + In.Rapport), 1.f);
+			else
+			{
+				NextAversion = Now + 0.3;
+			}
 		}
 		break;
 
@@ -522,8 +527,12 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 			if (T.bFrankVoice)
 			{
 				Avert(FMath::Clamp(SpeakAversionLength + 0.5f * FMath::FRandRange(-1.f, 1.f), 1.f, 3.f));
+				NextAversion = Now + Waiting(SpeakAversionEvery, 1.f);
 			}
-			NextAversion = Now + Waiting(SpeakAversionEvery, 1.f);
+			else
+			{
+				NextAversion = Now + 0.3; // in a pause of his voice: try again when he speaks
+			}
 		}
 		break;
 

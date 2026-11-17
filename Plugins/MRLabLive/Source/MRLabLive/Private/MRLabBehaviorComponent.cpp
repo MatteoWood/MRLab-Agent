@@ -619,6 +619,13 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 	Blinks.Update(Now, Turns, Gaze, TraceModelBlink, Arousal);
 
 	const FVector Mid = (In.EyeL + In.EyeR) * 0.5;
+	for (int32 Eye = 0; Eye < 2; ++Eye)
+	{
+		// The eye bone looks along its local Z (measured, README 4.10); the pose is the last evaluated one.
+		const FTransform Bone = Face->GetSocketTransform(EyeBones[Eye]);
+		const FVector Wanted = (Gaze.GazePoint - Bone.GetLocation()).GetSafeNormal();
+		TraceEyeError[Eye] = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(Bone.GetUnitAxis(EAxis::Z), Wanted), -1.f, 1.f)));
+	}
 	bTraceTracked = In.bTracked;
 	TraceVisitorDistance = In.bTracked ? (In.Visitor - Mid).Size() : 0.f;
 	TraceVisitorAngle = In.bTracked ? FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(
@@ -740,11 +747,12 @@ void UMRLabBehaviorComponent::WriteTrace(float Speaking)
 	FString Line = FString::Printf(TEXT("{\"t\":%.3f,\"speaking\":%.3f,\"playhead\":%lld,\"valence\":%.3f,\"arousal\":%.3f,\"rapport\":%.3f,\"mood\":%d,"),
 		Now - TraceStart, Speaking, Live ? Live->VoicePlayhead() : 0LL, Valence, Arousal, Rapport, CurrentMood);
 	Line += FString::Printf(TEXT("\"turn\":\"%s\",\"vlevel\":%.4f,\"gaze\":\"%s\",\"tracked\":%d,\"vdist\":%.0f,\"vangle\":%.2f,\"eyes\":[[%.2f,%.2f],[%.2f,%.2f]],")
-		TEXT("\"curves\":[[%.3f,%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f,%.3f]],\"shift\":[%.3f,%.1f],\"blink\":%.3f,\"mblink\":%.3f,\"head\":[%.1f,%.1f,%.1f],\"shown\":{"),
+		TEXT("\"curves\":[[%.3f,%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f,%.3f]],\"shift\":[%.3f,%.1f],\"blink\":%.3f,\"mblink\":%.3f,\"head\":[%.1f,%.1f,%.1f],\"eyeerr\":[%.2f,%.2f],\"blinks\":[%d,%d],\"shown\":{"),
 		MRLabTurnName(Turns.State), Live ? Live->VisitorLevel : 0.f, GazeKindName(Gaze.Kind), bTraceTracked ? 1 : 0, TraceVisitorDistance, TraceVisitorAngle,
 		Gaze.YawPitch[0][0], Gaze.YawPitch[0][1], Gaze.YawPitch[1][0], Gaze.YawPitch[1][1],
 		Gaze.Curves[0][0], Gaze.Curves[0][1], Gaze.Curves[0][2], Gaze.Curves[0][3], Gaze.Curves[1][0], Gaze.Curves[1][1], Gaze.Curves[1][2], Gaze.Curves[1][3],
-		Gaze.LastShiftAt - TraceStart, Gaze.LastShiftDegrees, Blinks.Value, TraceModelBlink, Gaze.HeadTarget.X, Gaze.HeadTarget.Y, Gaze.HeadTarget.Z);
+		Gaze.LastShiftAt - TraceStart, Gaze.LastShiftDegrees, Blinks.Value, TraceModelBlink, Gaze.HeadTarget.X, Gaze.HeadTarget.Y, Gaze.HeadTarget.Z,
+		TraceEyeError[0], TraceEyeError[1], Blinks.OwnCount, Blinks.ModelCount);
 	bool bFirst = true;
 	for (const FCategory& Category : Categories)
 	{
