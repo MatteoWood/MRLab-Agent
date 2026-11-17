@@ -435,6 +435,7 @@ struct FLipSync
 				// Mouth controls at 0 give the MetaHuman's closed neutral mouth.
 				Values.Add(Raw.FindRef(Names[Index].ToString()) * (IsMouth[Index] ? MouthWeight : 1.f));
 			}
+			Values.Add(MouthWeight); // last value: how much he is speaking (SpeakingWeight)
 			Frames.Emplace(Sample, MoveTemp(Values));
 		}
 		Pending.RemoveAt(0, Used);
@@ -656,9 +657,27 @@ void UMRLabLiveSession::HandleMessage(const FString& Message)
 	if (Type == TEXT("session.input_transcript.delta") || Type == TEXT("session.output_transcript.delta"))
 	{
 		FString EventId;
+		const bool bUser = Type == TEXT("session.input_transcript.delta");
+		int32 StartMs = -1;
+		int32 EndMs = -1;
+		Event->TryGetNumberField(TEXT("start_ms"), StartMs);
+		Event->TryGetNumberField(TEXT("end_ms"), EndMs);
 		if (Event->TryGetStringField(TEXT("event_id"), EventId))
 		{
-			Fragments.Add(EventId, { FPlatformTime::Seconds(), Type == TEXT("session.input_transcript.delta"), Event->GetStringField(TEXT("delta")) });
+			Fragments.Add(EventId, { FPlatformTime::Seconds(), bUser, Event->GetStringField(TEXT("delta")), StartMs, EndMs });
+		}
+		// A new utterance of Frank (after the visitor's words, or after a pause with his voice run dry): anchor his voice
+		// clock anew. Text runs about 1.4 s ahead of his audio, so a short gap inside an answer must not re-anchor.
+		if (!bUser && StartMs >= 0)
+		{
+			const double Now = FPlatformTime::Seconds();
+			if (AgentAnchorMs < 0 || bLastSpeakerUser
+				|| (Now - LastAgentFragment > 2.0 && VoiceWave && VoiceWave->GetAvailableAudioByteCount() == 0))
+			{
+				AgentAnchorMs = StartMs;
+				AgentAnchorSample = -1;
+			}
+			LastAgentFragment = Now;
 		}
 	}
 	if (Type == TEXT("session.output_audio.delta"))
@@ -744,13 +763,18 @@ void UMRLabLiveSession::HandleDecision(const FJsonObject& Event, const FString& 
 	}
 
 	// One line per decision: which side, how long after its fragment arrived, the fragment, the answers, the tokens.
+	// The same answers parsed for the behaviour component (OnDecision).
 	FString Answers;
+	FMRLabDecision Parsed;
 	for (const TSharedPtr<FJsonValue>& Value : (*Decision)->GetArrayField(TEXT("answers")))
 	{
 		const TSharedPtr<FJsonObject>& Answer = Value->AsObject();
 		const FString AnswerType = Answer->GetStringField(TEXT("type"));
 		FString Name;
 		Answer->TryGetStringField(TEXT("name"), Name);
+		FMRLabAnswer& Out = Parsed.Answers.AddDefaulted_GetRef();
+		Out.Name = FName(Name);
+		Answer->TryGetNumberField(TEXT("confidence"), Out.Confidence);
 		if (AnswerType == TEXT("choice"))
 		{
 			FString Choice;
@@ -760,18 +784,38 @@ void UMRLabLiveSession::HandleDecision(const FJsonObject& Event, const FString& 
 				Answer->TryGetBoolField(TEXT("choice"), bChoice);
 				Choice = bChoice ? TEXT("true") : TEXT("false");
 			}
+			Out.Kind = FMRLabAnswer::EKind::Choice;
+			Out.Choice = FName(Choice);
+			const TArray<TSharedPtr<FJsonValue>>* Options = nullptr;
+			if (Answer->TryGetArrayField(TEXT("probabilities"), Options))
+			{
+				for (const TSharedPtr<FJsonValue>& Option : *Options)
+				{
+					const TSharedPtr<FJsonObject>& OptionObject = Option->AsObject();
+					FString OptionName;
+					if (OptionObject.IsValid() && OptionObject->TryGetStringField(TEXT("value"), OptionName))
+					{
+						Out.Options.Add(FName(OptionName), float(OptionObject->GetNumberField(TEXT("probability"))));
+					}
+				}
+			}
 			Answers += FString::Printf(TEXT(" %s=%s(%.2f)"), *Name, *Choice, Answer->GetNumberField(TEXT("confidence")));
 		}
 		else if (AnswerType == TEXT("predicate"))
 		{
+			Out.Kind = FMRLabAnswer::EKind::Predicate;
+			Out.Value = float(Answer->GetNumberField(TEXT("probability")));
 			Answers += FString::Printf(TEXT(" %s=%.2f"), *Name, Answer->GetNumberField(TEXT("probability")));
 		}
 		else if (AnswerType == TEXT("score"))
 		{
+			Out.Kind = FMRLabAnswer::EKind::Score;
+			Out.Value = float(Answer->GetNumberField(TEXT("score")));
 			Answers += FString::Printf(TEXT(" %s=%.2f"), *Name, Answer->GetNumberField(TEXT("score")));
 		}
 		else
 		{
+			Parsed.Answers.Pop();
 			Answers += FString::Printf(TEXT(" %s=%s"), *Name, *AnswerType);
 		}
 	}
@@ -799,6 +843,17 @@ void UMRLabLiveSession::HandleDecision(const FJsonObject& Event, const FString& 
 		Fragment ? (Fragment->bUser ? TEXT("visitor") : TEXT("Frank")) : TEXT("?"),
 		Fragment ? FPlatformTime::Seconds() - Fragment->Arrived : -1.0, Fragment ? *Fragment->Text : TEXT(""),
 		*Answers, InputTokens, CachedTokens);
+
+	if (Fragment)
+	{
+		Parsed.bVisitor = Fragment->bUser;
+		Parsed.Text = Fragment->Text;
+		Parsed.StartMs = Fragment->StartMs;
+		Parsed.EndMs = Fragment->EndMs;
+		Parsed.FragmentArrived = Fragment->Arrived;
+		Parsed.Arrived = FPlatformTime::Seconds();
+		OnDecision.Broadcast(Parsed);
+	}
 }
 
 void UMRLabLiveSession::SetLipSyncMood(int32 Mood, float Intensity)
@@ -821,10 +876,16 @@ void UMRLabLiveSession::SetLipSyncMood(int32 Mood, float Intensity)
 void UMRLabLiveSession::QueueVoice(const int16* Samples, int32 NumSamples)
 {
 	TArray<int16> Pcm;
-	if (VoiceWave->GetAvailableAudioByteCount() == 0)
+	const bool bDry = VoiceWave->GetAvailableAudioByteCount() == 0;
+	if (bDry)
 	{
 		// Start of the stream, or the voice ran dry: hold it back again by the lip sync delay.
 		Pcm.AddZeroed(VoiceDelaySamples);
+	}
+	if (AgentAnchorMs >= 0 && AgentAnchorSample < 0)
+	{
+		// The first audio of Frank's current utterance.
+		AgentAnchorSample = VoiceQueued + (bDry ? VoiceDelaySamples : 0);
 	}
 	Pcm.Append(Samples, NumSamples);
 	VoiceWave->QueueAudio(reinterpret_cast<const uint8*>(Pcm.GetData()), Pcm.Num() * sizeof(int16));
@@ -849,7 +910,8 @@ void UMRLabLiveSession::UpdateLipSync()
 		return;
 	}
 	// The voice sample being played now: everything queued minus what is still waiting in the wave.
-	const int64 Playhead = VoiceQueued - VoiceWave->GetAvailableAudioByteCount() / sizeof(int16);
+	const bool bDry = VoiceWave->GetAvailableAudioByteCount() == 0;
+	Playhead = VoiceQueued - VoiceWave->GetAvailableAudioByteCount() / sizeof(int16);
 	LipSync->Playhead = Playhead;
 
 	FScopeLock ScopeLock(&LipSync->Lock);
@@ -870,7 +932,18 @@ void UMRLabLiveSession::UpdateLipSync()
 	{
 		LipSyncCurves.Add(LipSync->Names[Index], B ? FMath::Lerp(A.Value[Index], B->Value[Index], Alpha) : A.Value[Index]);
 	}
+	// The voice can stop without trailing silence; then no newer frame comes and the last speaking weight would stay.
+	SpeakingWeight = B ? FMath::Lerp(A.Value.Last(), B->Value.Last(), Alpha) : (bDry ? FMath::Max(0.f, SpeakingWeight - 0.1f) : A.Value.Last());
 	Frames.RemoveAt(0, Next - 1);
+}
+
+int64 UMRLabLiveSession::AgentFragmentSample(int32 StartMs) const
+{
+	if (StartMs < 0 || AgentAnchorMs < 0 || AgentAnchorSample < 0)
+	{
+		return -1;
+	}
+	return AgentAnchorSample + int64(StartMs - AgentAnchorMs) * LiveSampleRate / 1000;
 }
 
 void UMRLabLiveSession::AddTranscript(bool bUser, const FString& Delta)
@@ -1264,6 +1337,11 @@ void UMRLabLiveSession::Shutdown(const FString& Reason)
 	}
 	LipSyncModel = nullptr;
 	LipSyncCurves.Reset();
+	SpeakingWeight = 0.f;
+	Playhead = 0;
+	AgentAnchorMs = -1;
+	AgentAnchorSample = -1;
+	LastAgentFragment = 0.0;
 
 	if (OldSocket.IsValid())
 	{

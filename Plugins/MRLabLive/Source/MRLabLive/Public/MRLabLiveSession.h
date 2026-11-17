@@ -21,7 +21,40 @@ struct FMRLabFragment
 	double Arrived = 0.0;
 	bool bUser = false;
 	FString Text;
+	int32 StartMs = -1; // the fragment's start_ms / end_ms on the session timeline
+	int32 EndMs = -1;
 };
+
+/** One answer of a Decisions trigger: a choice (probability of every option), a predicate or a score. */
+struct FMRLabAnswer
+{
+	enum class EKind : uint8 { Choice, Predicate, Score };
+	FName Name;
+	EKind Kind = EKind::Choice;
+	FName Choice;               // the chosen option (choice)
+	TMap<FName, float> Options; // probability of each option (choice)
+	float Confidence = 0.f;     // choice and score
+	float Value = 0.f;          // probability (predicate) or score 0..1 (score)
+
+	/** Probability of an option (choice), 0 if it is not listed. */
+	float Probability(FName Option) const { return Options.FindRef(Option); }
+};
+
+/** A completed decision on one transcript fragment, with the fragment it was made on. */
+struct FMRLabDecision
+{
+	bool bVisitor = false;        // made on the visitor's words (else on Frank's)
+	FString Text;                 // the fragment
+	int32 StartMs = -1;           // the fragment's start_ms / end_ms (-1 if unknown)
+	int32 EndMs = -1;
+	double FragmentArrived = 0.0; // FPlatformTime::Seconds() when the fragment arrived (0 if unknown)
+	double Arrived = 0.0;         // when the decision arrived
+	TArray<FMRLabAnswer> Answers;
+
+	const FMRLabAnswer* Find(FName Name) const { return Answers.FindByPredicate([Name](const FMRLabAnswer& A) { return A.Name == Name; }); }
+};
+
+DECLARE_MULTICAST_DELEGATE_OneParam(FMRLabOnDecision, const FMRLabDecision&);
 
 /**
  * Spoken conversation with OpenAI gpt-live-1 through the Live API (WebSocket over WinHttp, Windows only).
@@ -69,6 +102,20 @@ public:
 	/** Face controls for the voice sample being heard now. Empty until the first answer. */
 	UPROPERTY(BlueprintReadOnly, Category = "MRLab Live")
 	TMap<FName, float> LipSyncCurves;
+
+	/** How much Frank is speaking at the sample being heard now: 0 silent, 1 speaking (the lip sync's mouth gate). */
+	UPROPERTY(BlueprintReadOnly, Category = "MRLab Live")
+	float SpeakingWeight = 0.f;
+
+	/** Every completed decision, parsed, on the game thread (C++ only). */
+	FMRLabOnDecision OnDecision;
+
+	/** The voice sample (24 kHz, counted from the session start) being heard now. */
+	int64 VoicePlayhead() const { return Playhead; }
+
+	/** The voice sample at which Frank's words starting at StartMs (start_ms of his transcript) are heard, or -1 while
+	 * the audio of his current utterance has not arrived yet. */
+	int64 AgentFragmentSample(int32 StartMs) const;
 
 	/** Tests: write every Live message sent and received to Saved/Recordings/<time>/events.jsonl. It contains the
 	 * visitors' voices, so it is off by default. */
@@ -152,6 +199,14 @@ private:
 
 	// Voice samples queued into VoiceWave so far, including inserted delay silence.
 	int64 VoiceQueued = 0;
+	// The voice sample being played now (set in UpdateLipSync).
+	int64 Playhead = 0;
+	// Voice clock of Frank's current utterance: its first fragment's start_ms and the voice sample where its audio
+	// starts (-1 until that audio arrives). Transcript times and audio positions differ by a constant within an
+	// utterance (README 4.13), so start_ms maps to samples from this anchor.
+	int32 AgentAnchorMs = -1;
+	int64 AgentAnchorSample = -1;
+	double LastAgentFragment = 0.0; // FPlatformTime::Seconds() of Frank's latest transcript fragment
 
 	FString UserText;
 	FString AgentText;

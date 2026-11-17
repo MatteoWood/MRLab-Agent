@@ -1,0 +1,92 @@
+{
+  "_about": "Frank's emotions and face expressions (README 4.14, Step 9B), read by UMRLabBehaviorComponent at BeginPlay. Recipes: MetaHuman face controls (CTRL_expressions_*) at full activation, seeded from Epic's facial poses (/MetaHumanCharacter/Optional/Animation/TemplateAnimations/Facial_Poses) and action units; strength scales all of them.",
+  "strength": 0.5,
+  "rise_seconds": 0.5,
+  "fall_seconds": 1.2,
+  "flash_seconds": 0.2,
+  "explicit_moods": true,
+  "mood_release_seconds": 1.0,
+  "slow_mood": { "valence": -0.15, "arousal": -0.2, "return_seconds": 90, "frank_share": 0.3, "rapport": 0.2 },
+  "gates": {
+    "_about": "impact is the Decisions score divided by 3 (flat 0, mild 0.33, clear 0.67, strong 1); below strong_impact a reaction needs the same answer on the next fragment within confirm_seconds.",
+    "probability": 0.55, "confidence": 0.4, "impact": 0.15, "strong_impact": 0.65,
+    "confirm_seconds": 3.0, "fresh_seconds": 2.0, "reversal_seconds": 8.0, "reversal_probability": 0.85
+  },
+  "speaking": {
+    "_about": "While Frank speaks the layer keeps the upper face, gives the mouth corners 30 %, never the rest of the mouth (the lip sync owns it).",
+    "upper": { "weight": 1.0, "prefixes": ["CTRL_expressions_brow", "CTRL_expressions_eye", "CTRL_expressions_nose"] },
+    "corners": { "weight": 0.3, "prefixes": ["CTRL_expressions_mouthCorner", "CTRL_expressions_mouthDimple"] },
+    "mouth": { "weight": 0.0, "prefixes": ["CTRL_expressions_mouth", "CTRL_expressions_jaw", "CTRL_expressions_tongue", "CTRL_expressions_teeth"] }
+  },
+  "baseline": {
+    "CTRL_expressions_browDownL": 0.08, "CTRL_expressions_browDownR": 0.08,
+    "CTRL_expressions_mouthCornerDepressL": 0.06, "CTRL_expressions_mouthCornerDepressR": 0.06,
+    "CTRL_expressions_browRaiseOuterL": 0.04
+  },
+  "categories": {
+    "amused": { "hold": 2.5, "gain": 0.7, "valence": 1, "recipe": {
+      "CTRL_expressions_mouthCornerPullL": 1.0, "CTRL_expressions_mouthCornerPullR": 0.85,
+      "CTRL_expressions_eyeCheekRaiseL": 0.7, "CTRL_expressions_eyeCheekRaiseR": 0.6,
+      "CTRL_expressions_eyeSquintInnerL": 0.6, "CTRL_expressions_eyeSquintInnerR": 0.5,
+      "CTRL_expressions_mouthDimpleL": 0.4, "CTRL_expressions_mouthDimpleR": 0.3,
+      "CTRL_expressions_browDownL": 0.1, "CTRL_expressions_browDownR": 0.1 } },
+    "warm": { "hold": 4.0, "gain": 0.6, "valence": 1, "recipe": {
+      "CTRL_expressions_mouthCornerPullL": 0.55, "CTRL_expressions_mouthCornerPullR": 0.5,
+      "CTRL_expressions_eyeCheekRaiseL": 0.35, "CTRL_expressions_eyeCheekRaiseR": 0.35,
+      "CTRL_expressions_eyeSquintInnerL": 0.25, "CTRL_expressions_eyeSquintInnerR": 0.25,
+      "CTRL_expressions_browRaiseInL": 0.15, "CTRL_expressions_browRaiseInR": 0.15 } },
+    "interested": { "hold": 5.0, "gain": 0.8, "valence": 1, "recipe": {
+      "CTRL_expressions_browRaiseInL": 0.45, "CTRL_expressions_browRaiseInR": 0.45,
+      "CTRL_expressions_browRaiseOuterL": 0.4, "CTRL_expressions_browRaiseOuterR": 0.4,
+      "CTRL_expressions_eyeWidenL": 0.2, "CTRL_expressions_eyeWidenR": 0.2 } },
+    "surprised": { "hold": 1.2, "gain": 0.8, "valence": 0, "flash": 0.4, "recipe": {
+      "CTRL_expressions_browRaiseInL": 0.76, "CTRL_expressions_browRaiseInR": 0.64,
+      "CTRL_expressions_browRaiseOuterL": 0.6, "CTRL_expressions_browRaiseOuterR": 0.69,
+      "CTRL_expressions_eyeWidenL": 1.0, "CTRL_expressions_eyeWidenR": 1.0,
+      "CTRL_expressions_jawOpen": 0.35 } },
+    "concerned": { "hold": 6.0, "gain": 0.8, "valence": -1, "recipe": {
+      "CTRL_expressions_browRaiseInL": 0.8, "CTRL_expressions_browRaiseInR": 0.7,
+      "CTRL_expressions_browLateralL": 0.6, "CTRL_expressions_browLateralR": 0.6,
+      "CTRL_expressions_browDownL": 0.25, "CTRL_expressions_browDownR": 0.3,
+      "CTRL_expressions_eyeSquintInnerL": 0.2, "CTRL_expressions_eyeSquintInnerR": 0.2,
+      "CTRL_expressions_mouthCornerDepressL": 0.36, "CTRL_expressions_mouthCornerDepressR": 0.36 } },
+    "wince": { "hold": 0.8, "gain": 1.0, "valence": -1, "flash": 0.5, "recipe": {
+      "CTRL_expressions_browDownL": 0.6, "CTRL_expressions_browDownR": 0.6,
+      "CTRL_expressions_browLateralL": 0.5, "CTRL_expressions_browLateralR": 0.5,
+      "CTRL_expressions_eyeSquintInnerL": 0.8, "CTRL_expressions_eyeSquintInnerR": 0.8,
+      "CTRL_expressions_eyeCheekRaiseL": 0.5, "CTRL_expressions_eyeCheekRaiseR": 0.5,
+      "CTRL_expressions_noseWrinkleL": 0.5, "CTRL_expressions_noseWrinkleR": 0.5,
+      "CTRL_expressions_mouthStretchL": 0.5, "CTRL_expressions_mouthStretchR": 0.5 } },
+    "skeptical": { "hold": 4.0, "gain": 1.0, "valence": -1, "recipe": {
+      "CTRL_expressions_browRaiseOuterL": 0.6, "CTRL_expressions_browDownR": 0.2,
+      "CTRL_expressions_eyeSquintInnerR": 0.2, "CTRL_expressions_mouthDimpleR": 0.45 } },
+    "puzzled": { "hold": 3.0, "gain": 0.8, "valence": 0, "recipe": {
+      "CTRL_expressions_browDownL": 0.35, "CTRL_expressions_browDownR": 0.35,
+      "CTRL_expressions_browLateralL": 0.4, "CTRL_expressions_browLateralR": 0.4,
+      "CTRL_expressions_eyeSquintInnerL": 0.45, "CTRL_expressions_eyeSquintInnerR": 0.45,
+      "CTRL_expressions_browRaiseInL": 0.15 } },
+    "annoyed": { "hold": 4.0, "gain": 0.8, "valence": -1, "flash": 0.3, "recipe": {
+      "CTRL_expressions_browDownL": 0.55, "CTRL_expressions_browDownR": 0.6,
+      "CTRL_expressions_browLateralL": 0.5, "CTRL_expressions_browLateralR": 0.5,
+      "CTRL_expressions_eyeSquintInnerL": 0.5, "CTRL_expressions_eyeSquintInnerR": 0.55,
+      "CTRL_expressions_mouthPressUL": 0.4, "CTRL_expressions_mouthPressUR": 0.4,
+      "CTRL_expressions_mouthPressDL": 0.4, "CTRL_expressions_mouthPressDR": 0.4,
+      "CTRL_expressions_noseWrinkleL": 0.15, "CTRL_expressions_noseWrinkleR": 0.15 } },
+    "knowing": { "hold": 3.0, "gain": 0.8, "valence": 0, "recipe": {
+      "CTRL_expressions_browRaiseOuterL": 0.45, "CTRL_expressions_mouthCornerPullL": 0.45,
+      "CTRL_expressions_eyeSquintInnerL": 0.15 } }
+  },
+  "delivery": {
+    "_about": "Frank's own delivery (agent-side Decisions): lip sync mood (Epic's EAudioDrivenAnimationMood index and intensity) set when his words are heard, an expression category, and a share of the slow mood. plain keeps the mood the voice gives.",
+    "plain": { "valence": 0 },
+    "dry": { "mood": 10, "intensity": 0.3, "valence": 0 },
+    "knowing": { "mood": 10, "intensity": 0.5, "category": "knowing", "valence": 0.2 },
+    "amused": { "mood": 17, "intensity": 0.4, "valence": 0.5 },
+    "amused_laugh": { "mood": 1, "intensity": 0.6 },
+    "warm": { "mood": 1, "intensity": 0.35, "valence": 0.5 },
+    "grumbling": { "mood": 4, "intensity": 0.25, "valence": -0.5 },
+    "unsure": { "mood": 19, "intensity": 0.4, "valence": 0 },
+    "surprised": { "mood": 5, "intensity": 0.5, "valence": 0 },
+    "serious": { "mood": 2, "intensity": 0.3, "valence": -0.3 }
+  }
+}
