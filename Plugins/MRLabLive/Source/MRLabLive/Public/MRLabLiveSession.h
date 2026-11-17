@@ -15,6 +15,14 @@ class USoundWaveProcedural;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FMRLabLiveText, const FString&, Text);
 
+/** A transcript fragment as it arrived, kept to time the decisions made on it. */
+struct FMRLabFragment
+{
+	double Arrived = 0.0;
+	bool bUser = false;
+	FString Text;
+};
+
 /**
  * Spoken conversation with OpenAI gpt-live-1 through the Live API (WebSocket over WinHttp, Windows only).
  * Streams the default microphone to the model and plays the agent's voice from the owning actor.
@@ -26,6 +34,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FMRLabLiveText, const FString&, Text
  * Seeing: the camera service on the tracking PC sends a description of the people the camera sees as UDP packets to
  * the port in Saved/VisionPort.txt (not in Git); new descriptions are added to the session as silent context while
  * the visitor speaks, so the agent always knows its view.
+ * Decisions: the triggers in Config/MRLabDecisions.json answer fixed questions on every transcript fragment of both
+ * sides (reactions, requests, Frank's delivery); each answer is logged with its delay and tokens.
  */
 UCLASS(ClassGroup = (MRLab), meta = (BlueprintSpawnableComponent))
 class MRLABLIVE_API UMRLabLiveSession : public UActorComponent
@@ -60,19 +70,43 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "MRLab Live")
 	TMap<FName, float> LipSyncCurves;
 
+	/** Tests: write every Live message sent and received to Saved/Recordings/<time>/events.jsonl. It contains the
+	 * visitors' voices, so it is off by default. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MRLab Live|Tests")
+	bool bRecordSession = false;
+
+	/** Tests: instead of the microphone, send this WAV file (24 kHz, mono, 16 bit) as the visitor's voice, then silence. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MRLab Live|Tests")
+	FString TestInputWav;
+
+	/** Tests: instead of connecting, play back a recording (a folder with events.jsonl): Frank's voice, lip sync,
+	 * transcripts and decisions, with their original timing. Nothing is sent. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MRLab Live|Tests")
+	FString ReplayFolder;
+
 	UFUNCTION(BlueprintCallable, Category = "MRLab Live")
 	void StartSession();
 
 	UFUNCTION(BlueprintCallable, Category = "MRLab Live")
 	void StopSession();
 
+	/** Mood input of the lip sync model from the next 20 ms step on: index of Epic's EAudioDrivenAnimationMood
+	 * (0 neutral, 1 happy, 2 sad, 3 disgust, 4 anger, 5 surprise, 6 fear, 10 confident, 14 excited, 15 bored,
+	 * 17 playful, 19 confused) with its intensity; 255 = detected from the voice (the default). */
+	UFUNCTION(BlueprintCallable, Category = "MRLab Live")
+	void SetLipSyncMood(int32 Mood, float Intensity);
+
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
 	void HandleMessage(const FString& Message);
+	void HandleDecision(const FJsonObject& Event, const FString& Message);
 	void Send(const TSharedRef<FJsonObject>& Event);
-	void StartAudio();
+	void StartVoice();
+	void StartMicrophone();
+	void StartReplay();
+	void Record(bool bSent, const FString& Message);
 	void Shutdown(const FString& Reason);
 	void AddTranscript(bool bUser, const FString& Delta);
 	void QueueVoice(const int16* Samples, int32 NumSamples);
@@ -134,4 +168,28 @@ private:
 	FString LastView;    // the last view added to the session
 	int32 ViewCount = 0; // views added to this session, numbered in the context
 	bool bBlind = false; // the camera service is down or its camera stopped
+
+	// Decisions (Config/MRLabDecisions.json): items appended once at session start; transcript fragments by event_id,
+	// to log how long each decision took after its fragment arrived.
+	TArray<FString> DecisionItems;
+	TMap<FString, FMRLabFragment> Fragments;
+	int32 DecisionCount = 0;
+	int64 DecisionInputTokens = 0;
+	int64 DecisionCachedTokens = 0;
+
+	// Recording (bRecordSession): one JSON line per message, with seconds since the session started.
+	TUniquePtr<FArchive> RecordFile;
+	double RecordStart = 0.0;
+
+	// Test input (TestInputWav): 24 kHz PCM sent in real time from session start.
+	TArray<int16> TestPcm;
+	int64 TestSent = 0;
+	double TestStart = 0.0;
+	bool bTestInput = false;
+
+	// Replay (ReplayFolder): received messages with their time since session start.
+	TArray<TPair<double, FString>> ReplayEvents;
+	int32 ReplayNext = 0;
+	double ReplayStart = 0.0;
+	bool bReplaying = false;
 };

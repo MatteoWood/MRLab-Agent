@@ -1,0 +1,155 @@
+{
+  "items": [
+    "You judge a live spoken conversation to drive the face and body of Frank, a digital human on an LED wall in a university lab. Frank is 57, a lifelong technician: grumpy, dry, sarcastic, a know-it-all, warm underneath, never cruel. He shows little: small reactions, rarely a full smile, an eye roll at nonsense. Absurd things and friendly teasing amuse him, kindness softens him, rudeness and being ordered about annoy him, technical talk wakes him up, mistreated equipment makes him wince. The visitor's lines come from speech recognition and can be cut off or misheard: when the newest words are incomplete or unclear, choose none or the lowest level. Lines that start with View, Voice, Body or Scene are facts from the app, not speech; the newest of each kind replaces older ones."
+  ],
+  "triggers": [
+    {
+      "type": "decisions",
+      "event_type": "session.input_transcript.delta",
+      "decisions": {
+        "questions": [
+          {
+            "type": "choice",
+            "name": "reaction",
+            "instructions": "Frank is listening. Judge the visitor's newest words in the context of the conversation: what shows on Frank's face right now? Choose none for filler, routine talk, half sentences and anything that may be misheard.",
+            "choices": [
+              {"value": "none", "description": "Nothing that calls for a visible reaction yet."},
+              {"value": "amused", "description": "Funny, absurd, or a friendly tease, also at Frank's expense."},
+              {"value": "warm", "description": "Thanks, praise, kindness, or good news for the visitor."},
+              {"value": "interested", "description": "A real question, or a topic Frank cares about: the lab, the LED wall, cameras, machines, repairs."},
+              {"value": "surprised", "description": "Unexpected news, an odd claim, a sudden turn."},
+              {"value": "concerned", "description": "Bad news, sadness, worry, trouble for someone."},
+              {"value": "wince", "description": "Pain, an accident, an embarrassing moment, or equipment being mistreated."},
+              {"value": "skeptical", "description": "A dubious, wrong or boastful claim, hype, a technical mistake."},
+              {"value": "puzzled", "description": "Confusing, contradictory or nonsensical words."},
+              {"value": "annoyed", "description": "Rudeness, an insult, pestering, being ordered about like a toy."}
+            ]
+          },
+          {
+            "type": "score",
+            "name": "impact",
+            "instructions": "How strongly do the visitor's newest words move Frank, whatever the feeling? He is hard to impress.",
+            "levels": [
+              {"label": "flat", "description": "Routine talk; nothing visible."},
+              {"label": "mild", "description": "A flicker: one brow, a corner of the mouth."},
+              {"label": "clear", "description": "A reaction anyone would notice."},
+              {"label": "strong", "description": "Shocking, hilarious, alarming, or a real insult."}
+            ]
+          },
+          {
+            "type": "predicate",
+            "name": "asks_frank",
+            "instructions": "The visitor's newest words ask Frank something: a question, his opinion, help or an action, and they expect him to respond."
+          },
+          {
+            "type": "predicate",
+            "name": "turn_done",
+            "instructions": "The visitor has finished what they want to say for now, so Frank could answer. False if the last sentence is unfinished, ends in a word like 'and', 'so' or 'but', or they are in the middle of a story or a list."
+          },
+          {
+            "type": "predicate",
+            "name": "to_frank",
+            "instructions": "The visitor is talking to Frank, not to a companion, on the phone, or to themselves."
+          },
+          {
+            "type": "choice",
+            "name": "body_request",
+            "instructions": "Is the visitor, in their current turn, asking Frank to do something with his body now? 'Can you wave?' counts as asking. Talking about movement, or asking whether he could in general, does not.",
+            "choices": [
+              {"value": "none", "description": "No request for Frank to move."},
+              {"value": "gesture_pose", "description": "A gesture, pose or body part: raise an arm, wave, thumbs up, cross the arms, nod, shrug, turn around."},
+              {"value": "look_point", "description": "Look or point at something or someone."},
+              {"value": "athletic", "description": "Whole-body or athletic: jump, dance, squat, backflip, push-ups."},
+              {"value": "move_place", "description": "Walk, come closer, step back, sit down, leave his spot."},
+              {"value": "copy_me", "description": "Copy what the visitor is doing."},
+              {"value": "stop_undo", "description": "Stop moving, put it down, go back to normal."}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "decisions",
+      "event_type": "session.output_transcript.delta",
+      "decisions": {
+        "questions": [
+          {
+            "type": "choice",
+            "name": "delivery",
+            "instructions": "Frank is speaking. How does he mean his newest words? Use the words, the newest Voice Frank note and his character. He is dry by default: choose plain or dry unless a feeling is clear.",
+            "choices": [
+              {"value": "plain", "description": "Matter-of-fact, no feeling shown."},
+              {"value": "dry", "description": "Deadpan sarcasm or irony: says one thing, means another."},
+              {"value": "amused", "description": "Openly enjoying a joke, chuckling."},
+              {"value": "warm", "description": "Kind, encouraging, fond."},
+              {"value": "grumbling", "description": "Complaining, irritated, fed up."},
+              {"value": "knowing", "description": "Showing off a detail, lecturing with relish."},
+              {"value": "unsure", "description": "Does not know, hedges, thinks aloud."},
+              {"value": "surprised", "description": "Taken aback."},
+              {"value": "serious", "description": "Sympathetic or grave about something bad."}
+            ]
+          },
+          {
+            "type": "score",
+            "name": "strength",
+            "instructions": "How strongly does a feeling show in Frank's newest words?",
+            "levels": [
+              {"label": "none", "description": "Flat delivery."},
+              {"label": "slight", "description": "Barely there."},
+              {"label": "clear", "description": "Plain to hear."},
+              {"label": "strong", "description": "He lets it out."}
+            ]
+          },
+          {
+            "type": "choice",
+            "name": "gesture",
+            "instructions": "Which single gesture do Frank's newest words call for? Choose none unless the words themselves carry it: he moves little.",
+            "choices": [
+              {"value": "none", "description": "No specific gesture."},
+              {"value": "shrug", "description": "Does not know, does not care, cannot be helped."},
+              {"value": "head_shake", "description": "No, refusal, disbelief."},
+              {"value": "nod", "description": "Yes, agreement, confirming."},
+              {"value": "point_you", "description": "Means the visitor: you, your."},
+              {"value": "point_self", "description": "Means himself or his own experience."},
+              {"value": "point_there", "description": "Means a thing or place in the room: the wall, a camera, over there."},
+              {"value": "wave_off", "description": "Dismisses something as nonsense or not worth it."},
+              {"value": "raised_finger", "description": "Stresses one exact detail or a correction."},
+              {"value": "count", "description": "Lists items or steps."},
+              {"value": "open_hand", "description": "Presents or explains something to the visitor."},
+              {"value": "greet", "description": "Hello or goodbye."}
+            ]
+          },
+          {
+            "type": "choice",
+            "name": "move_answer",
+            "instructions": "Take the visitor's latest request for Frank to move his body, if any. What do Frank's words since that request say about it?",
+            "choices": [
+              {"value": "no_request", "description": "There is no such request, or it was settled earlier."},
+              {"value": "agrees", "description": "He does it or will do it now, even grudgingly."},
+              {"value": "agrees_other", "description": "He offers a smaller or different movement instead."},
+              {"value": "refuses", "description": "No, cannot or will not; also a sarcastic yes he plainly does not mean."},
+              {"value": "open", "description": "No answer yet: stalling, asking back, another subject."}
+            ]
+          },
+          {
+            "type": "choice",
+            "name": "sound",
+            "instructions": "What kind of sound are Frank's newest words?",
+            "choices": [
+              {"value": "words", "description": "Ordinary speech."},
+              {"value": "listening", "description": "A short listening sound while the visitor talks: mm-hm, yeah, right."},
+              {"value": "laugh", "description": "A chuckle or laugh."},
+              {"value": "sigh", "description": "A sigh, groan or grunt."},
+              {"value": "hesitation", "description": "A filler or restart: uh, well, hmm, I mean."}
+            ]
+          },
+          {
+            "type": "predicate",
+            "name": "turn_final",
+            "instructions": "Frank's newest words end his answer: he has made his point or asked the visitor something and is handing the turn back."
+          }
+        ]
+      }
+    }
+  ]
+}

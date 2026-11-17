@@ -390,6 +390,14 @@ struct FLipSync
 				continue;
 			}
 
+			{
+				FScopeLock MoodScope(&MoodLock);
+				if (PendingMood.Num() == MoodInput.Num())
+				{
+					MoodInput = MoveTemp(PendingMood);
+					PendingMood.Reset();
+				}
+			}
 			const double SolveStart = FPlatformTime::Seconds();
 			const bool bSolved = RunModel();
 			const double SolveTime = FPlatformTime::Seconds() - SolveStart;
@@ -444,6 +452,10 @@ struct FLipSync
 	TArray<float> MoodInput;
 	TArray<int64> LookaheadInput;
 
+	// Mood set from the game thread (SetLipSyncMood), taken over before the next model run.
+	FCriticalSection MoodLock;
+	TArray<float> PendingMood;
+
 	Audio::FResampler Resampler;
 	TArray<float> Pending;     // 16 kHz samples not stepped yet
 	int64 Solved = 0;          // 16 kHz samples stepped so far
@@ -479,8 +491,13 @@ UMRLabLiveSession::UMRLabLiveSession()
 
 void UMRLabLiveSession::StartSession()
 {
-	if (Socket.IsValid())
+	if (Socket.IsValid() || bReplaying)
 	{
+		return;
+	}
+	if (!ReplayFolder.IsEmpty())
+	{
+		StartReplay();
 		return;
 	}
 
@@ -500,9 +517,40 @@ void UMRLabLiveSession::StartSession()
 	const FString FullInstructions = Instructions + TEXT("\n\n") + NoDelegationRule + TEXT("\n\n") + SeeingRule
 		+ (Knowledge.IsEmpty() ? FString() : TEXT("\n\nLab knowledge:") + Knowledge);
 
+	// Decisions (README section 5, Step 9): triggers answer fixed questions on every transcript fragment of both sides.
+	TArray<TSharedPtr<FJsonValue>> Triggers;
+	DecisionItems.Reset();
+	const FString DecisionsPath = FPaths::ProjectConfigDir() / TEXT("MRLabDecisions.json");
+	FString DecisionsText;
+	TSharedPtr<FJsonObject> Decisions;
+	if (FFileHelper::LoadFileToString(DecisionsText, *DecisionsPath))
+	{
+		if (FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(DecisionsText), Decisions) && Decisions.IsValid())
+		{
+			Triggers = Decisions->GetArrayField(TEXT("triggers"));
+			for (const TSharedPtr<FJsonValue>& Item : Decisions->GetArrayField(TEXT("items")))
+			{
+				DecisionItems.Add(Item->AsString());
+			}
+			UE_LOG(LogMRLabLive, Log, TEXT("Decisions: %d triggers, %d items from %s"), Triggers.Num(), DecisionItems.Num(), *DecisionsPath);
+		}
+		else
+		{
+			UE_LOG(LogMRLabLive, Error, TEXT("Decisions: %s is not valid JSON; no triggers"), *DecisionsPath);
+		}
+	}
+
+	if (bRecordSession)
+	{
+		const FString Path = FPaths::ProjectSavedDir() / TEXT("Recordings") / FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")) / TEXT("events.jsonl");
+		RecordFile.Reset(IFileManager::Get().CreateFileWriter(*Path));
+		RecordStart = FPlatformTime::Seconds();
+		UE_LOG(LogMRLabLive, Log, TEXT("Recording the session to %s"), *FPaths::ConvertRelativePathToFull(Path));
+	}
+
 	Socket = MakeShared<FLiveSocket>();
 	TWeakObjectPtr<UMRLabLiveSession> WeakThis(this);
-	Socket->OnOpened = [WeakThis, FullInstructions]()
+	Socket->OnOpened = [WeakThis, FullInstructions, Triggers]()
 	{
 		UMRLabLiveSession* This = WeakThis.Get();
 		if (!This)
@@ -521,6 +569,10 @@ void UMRLabLiveSession::StartSession()
 		Session->SetStringField(TEXT("model"), This->Model);
 		Session->SetStringField(TEXT("instructions"), FullInstructions);
 		Session->SetObjectField(TEXT("audio"), Audio);
+		if (Triggers.Num() > 0)
+		{
+			Session->SetArrayField(TEXT("triggers"), Triggers);
+		}
 		TSharedRef<FJsonObject> Event = MakeShared<FJsonObject>();
 		Event->SetStringField(TEXT("type"), TEXT("session.start"));
 		Event->SetObjectField(TEXT("session"), Session);
@@ -563,13 +615,36 @@ void UMRLabLiveSession::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void UMRLabLiveSession::Send(const TSharedRef<FJsonObject>& Event)
 {
+	if (!Socket.IsValid())
+	{
+		return; // replay: nothing is sent
+	}
 	FString Text;
 	FJsonSerializer::Serialize(Event, TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text));
+	Record(true, Text);
 	Socket->Send(Text);
+}
+
+void UMRLabLiveSession::Record(bool bSent, const FString& Message)
+{
+	if (!RecordFile.IsValid())
+	{
+		return;
+	}
+	// JSON outside strings may contain line breaks; inside strings they are escaped, so replacing them keeps the JSON.
+	FString OneLine = Message.Replace(TEXT("\r"), TEXT(" ")).Replace(TEXT("\n"), TEXT(" "));
+	const FString Line = FString::Printf(TEXT("{\"t\":%.4f,\"d\":\"%s\",\"m\":%s}\n"),
+		FPlatformTime::Seconds() - RecordStart, bSent ? TEXT("out") : TEXT("in"), *OneLine);
+	const FTCHARToUTF8 Utf8(*Line);
+	RecordFile->Serialize((void*)Utf8.Get(), Utf8.Length());
 }
 
 void UMRLabLiveSession::HandleMessage(const FString& Message)
 {
+	if (!bReplaying)
+	{
+		Record(false, Message);
+	}
 	TSharedPtr<FJsonObject> Event;
 	if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Message), Event) || !Event.IsValid())
 	{
@@ -578,6 +653,14 @@ void UMRLabLiveSession::HandleMessage(const FString& Message)
 	}
 
 	const FString Type = Event->GetStringField(TEXT("type"));
+	if (Type == TEXT("session.input_transcript.delta") || Type == TEXT("session.output_transcript.delta"))
+	{
+		FString EventId;
+		if (Event->TryGetStringField(TEXT("event_id"), EventId))
+		{
+			Fragments.Add(EventId, { FPlatformTime::Seconds(), Type == TEXT("session.input_transcript.delta"), Event->GetStringField(TEXT("delta")) });
+		}
+	}
 	if (Type == TEXT("session.output_audio.delta"))
 	{
 		TArray<uint8> Pcm;
@@ -599,8 +682,26 @@ void UMRLabLiveSession::HandleMessage(const FString& Message)
 	{
 		UE_LOG(LogMRLabLive, Log, TEXT("Session started: %s"), *Message.Left(300));
 		bStarted = true;
-		StartAudio();
+		StartVoice();
+		StartMicrophone();
 		OpenViewSocket();
+		for (int32 Index = 0; Index < DecisionItems.Num(); ++Index)
+		{
+			// Context for the decisions only; the voice model does not see it.
+			TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+			Item->SetStringField(TEXT("type"), TEXT("message"));
+			Item->SetStringField(TEXT("role"), TEXT("developer"));
+			Item->SetStringField(TEXT("content"), DecisionItems[Index]);
+			TSharedRef<FJsonObject> ItemEvent = MakeShared<FJsonObject>();
+			ItemEvent->SetStringField(TEXT("type"), TEXT("decision.item.create"));
+			ItemEvent->SetStringField(TEXT("event_id"), FString::Printf(TEXT("decision_item_%d"), Index));
+			ItemEvent->SetObjectField(TEXT("item"), Item);
+			Send(ItemEvent);
+		}
+	}
+	else if (Type == TEXT("decision.event"))
+	{
+		HandleDecision(*Event, Message);
 	}
 	else if (Type == TEXT("session.closed"))
 	{
@@ -629,6 +730,92 @@ void UMRLabLiveSession::HandleMessage(const FString& Message)
 	{
 		UE_LOG(LogMRLabLive, Log, TEXT("Event %s"), *Message.Left(300));
 	}
+}
+
+void UMRLabLiveSession::HandleDecision(const FJsonObject& Event, const FString& Message)
+{
+	const TSharedPtr<FJsonObject>* Inner = nullptr;
+	const TSharedPtr<FJsonObject>* Decision = nullptr;
+	if (!Event.TryGetObjectField(TEXT("event"), Inner) || (*Inner)->GetStringField(TEXT("type")) != TEXT("decision.completed")
+		|| !(*Inner)->TryGetObjectField(TEXT("decision"), Decision))
+	{
+		UE_LOG(LogMRLabLive, Warning, TEXT("Decision not completed: %s"), *Message.Left(1000));
+		return;
+	}
+
+	// One line per decision: which side, how long after its fragment arrived, the fragment, the answers, the tokens.
+	FString Answers;
+	for (const TSharedPtr<FJsonValue>& Value : (*Decision)->GetArrayField(TEXT("answers")))
+	{
+		const TSharedPtr<FJsonObject>& Answer = Value->AsObject();
+		const FString AnswerType = Answer->GetStringField(TEXT("type"));
+		FString Name;
+		Answer->TryGetStringField(TEXT("name"), Name);
+		if (AnswerType == TEXT("choice"))
+		{
+			FString Choice;
+			if (!Answer->TryGetStringField(TEXT("choice"), Choice))
+			{
+				bool bChoice = false;
+				Answer->TryGetBoolField(TEXT("choice"), bChoice);
+				Choice = bChoice ? TEXT("true") : TEXT("false");
+			}
+			Answers += FString::Printf(TEXT(" %s=%s(%.2f)"), *Name, *Choice, Answer->GetNumberField(TEXT("confidence")));
+		}
+		else if (AnswerType == TEXT("predicate"))
+		{
+			Answers += FString::Printf(TEXT(" %s=%.2f"), *Name, Answer->GetNumberField(TEXT("probability")));
+		}
+		else if (AnswerType == TEXT("score"))
+		{
+			Answers += FString::Printf(TEXT(" %s=%.2f"), *Name, Answer->GetNumberField(TEXT("score")));
+		}
+		else
+		{
+			Answers += FString::Printf(TEXT(" %s=%s"), *Name, *AnswerType);
+		}
+	}
+
+	int64 InputTokens = 0;
+	int64 CachedTokens = 0;
+	const TSharedPtr<FJsonObject>* Usage = nullptr;
+	if ((*Decision)->TryGetObjectField(TEXT("usage"), Usage))
+	{
+		InputTokens = int64((*Usage)->GetNumberField(TEXT("input_tokens")));
+		const TSharedPtr<FJsonObject>* Details = nullptr;
+		if ((*Usage)->TryGetObjectField(TEXT("input_tokens_details"), Details))
+		{
+			CachedTokens = int64((*Details)->GetNumberField(TEXT("cached_tokens")));
+		}
+	}
+	++DecisionCount;
+	DecisionInputTokens += InputTokens;
+	DecisionCachedTokens += CachedTokens;
+
+	FString SourceId;
+	Event.TryGetStringField(TEXT("source_event_id"), SourceId);
+	const FMRLabFragment* Fragment = Fragments.Find(SourceId);
+	UE_LOG(LogMRLabLive, Log, TEXT("Decision %s %.2f s \"%s\":%s (tokens %lld, cached %lld)"),
+		Fragment ? (Fragment->bUser ? TEXT("visitor") : TEXT("Frank")) : TEXT("?"),
+		Fragment ? FPlatformTime::Seconds() - Fragment->Arrived : -1.0, Fragment ? *Fragment->Text : TEXT(""),
+		*Answers, InputTokens, CachedTokens);
+}
+
+void UMRLabLiveSession::SetLipSyncMood(int32 Mood, float Intensity)
+{
+	if (!LipSync.IsValid())
+	{
+		return;
+	}
+	TArray<float> MoodArray;
+	MoodArray.SetNumZeroed(21);
+	if (Mood >= 0 && Mood < MoodArray.Num())
+	{
+		MoodArray[Mood] = Intensity; // as FSpeechAnimationSolverV4: the mood's slot holds its intensity, all zeros = detect
+	}
+	FScopeLock MoodScope(&LipSync->MoodLock);
+	LipSync->PendingMood = MoveTemp(MoodArray);
+	UE_LOG(LogMRLabLive, Log, TEXT("Lip sync mood %d, intensity %.2f"), Mood, Intensity);
 }
 
 void UMRLabLiveSession::QueueVoice(const int16* Samples, int32 NumSamples)
@@ -815,8 +1002,49 @@ void UMRLabLiveSession::AppendView(const FString& Text)
 	Send(Event);
 }
 
-void UMRLabLiveSession::StartAudio()
+void UMRLabLiveSession::StartMicrophone()
 {
+	if (!TestInputWav.IsEmpty())
+	{
+		// Test input: a WAV file (24 kHz, mono, 16 bit PCM) stands in for the visitor, sent in real time.
+		TArray<uint8> Bytes;
+		FFileHelper::LoadFileToArray(Bytes, *TestInputWav);
+		int32 Pos = 12;
+		int32 Channels = 0;
+		int32 Rate = 0;
+		int32 Bits = 0;
+		while (Bytes.Num() >= 12 && Pos + 8 <= Bytes.Num())
+		{
+			const int32 Size = *reinterpret_cast<const int32*>(Bytes.GetData() + Pos + 4);
+			if (FMemory::Memcmp(Bytes.GetData() + Pos, "fmt ", 4) == 0 && Pos + 24 <= Bytes.Num())
+			{
+				Channels = *reinterpret_cast<const int16*>(Bytes.GetData() + Pos + 10);
+				Rate = *reinterpret_cast<const int32*>(Bytes.GetData() + Pos + 12);
+				Bits = *reinterpret_cast<const int16*>(Bytes.GetData() + Pos + 22);
+			}
+			else if (FMemory::Memcmp(Bytes.GetData() + Pos, "data", 4) == 0)
+			{
+				const int32 Available = FMath::Min(Size, Bytes.Num() - Pos - 8);
+				TestPcm.SetNumUninitialized(Available / 2);
+				FMemory::Memcpy(TestPcm.GetData(), Bytes.GetData() + Pos + 8, TestPcm.Num() * 2);
+				break;
+			}
+			Pos += 8 + Size + (Size & 1);
+		}
+		if (Channels != 1 || Rate != LiveSampleRate || Bits != 16 || TestPcm.Num() == 0)
+		{
+			UE_LOG(LogMRLabLive, Error, TEXT("Test input %s is not a 24 kHz mono 16 bit WAV (%d Hz, %d channels, %d bit)"), *TestInputWav, Rate, Channels, Bits);
+			TestPcm.Reset();
+			StopSession();
+			return;
+		}
+		bTestInput = true;
+		TestSent = 0;
+		TestStart = FPlatformTime::Seconds();
+		UE_LOG(LogMRLabLive, Log, TEXT("Test input instead of the microphone: %s, %.1f s"), *TestInputWav, TestPcm.Num() / float(LiveSampleRate));
+		return;
+	}
+
 	Mic = NewObject<UAudioCapture>(this);
 	if (!Mic->OpenDefaultAudioStream())
 	{
@@ -830,7 +1058,46 @@ void UMRLabLiveSession::StartAudio()
 	MicHandle = Mic->AddGeneratorDelegate([this](const float* Samples, int32 NumSamples) { OnMicAudio(Samples, NumSamples); });
 	Mic->StartCapturingAudio();
 	UE_LOG(LogMRLabLive, Log, TEXT("Microphone open: %d Hz, %d channels"), MicRate, MicChannels);
+}
 
+void UMRLabLiveSession::StartReplay()
+{
+	const FString Path = ReplayFolder / TEXT("events.jsonl");
+	TArray<FString> Lines;
+	if (!FFileHelper::LoadFileToStringArray(Lines, *Path))
+	{
+		UE_LOG(LogMRLabLive, Error, TEXT("Replay: cannot read %s"), *Path);
+		return;
+	}
+	ReplayEvents.Reset();
+	for (const FString& Line : Lines)
+	{
+		TSharedPtr<FJsonObject> Entry;
+		if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Line), Entry) || !Entry.IsValid()
+			|| Entry->GetStringField(TEXT("d")) != TEXT("in"))
+		{
+			continue;
+		}
+		const TSharedPtr<FJsonObject> Message = Entry->GetObjectField(TEXT("m"));
+		if (Message->GetStringField(TEXT("type")) == TEXT("session.started"))
+		{
+			continue; // would open the microphone and the camera socket
+		}
+		FString Text;
+		FJsonSerializer::Serialize(Message.ToSharedRef(), TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text));
+		ReplayEvents.Emplace(Entry->GetNumberField(TEXT("t")), MoveTemp(Text));
+	}
+	UE_LOG(LogMRLabLive, Log, TEXT("Replay of %s: %d messages, %.1f s"), *Path, ReplayEvents.Num(),
+		ReplayEvents.Num() > 0 ? ReplayEvents.Last().Key : 0.0);
+	bReplaying = true;
+	bStarted = true;
+	ReplayNext = 0;
+	ReplayStart = FPlatformTime::Seconds();
+	StartVoice();
+}
+
+void UMRLabLiveSession::StartVoice()
+{
 	VoiceWave = NewObject<USoundWaveProcedural>(this);
 	VoiceWave->SetSampleRate(LiveSampleRate);
 	VoiceWave->NumChannels = 1;
@@ -895,6 +1162,20 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	{
 		return;
 	}
+	if (bReplaying)
+	{
+		const double Elapsed = FPlatformTime::Seconds() - ReplayStart;
+		while (ReplayNext < ReplayEvents.Num() && ReplayEvents[ReplayNext].Key <= Elapsed)
+		{
+			HandleMessage(ReplayEvents[ReplayNext++].Value);
+		}
+		UpdateLipSync();
+		if (ReplayNext >= ReplayEvents.Num() && (ReplayEvents.Num() == 0 || Elapsed > ReplayEvents.Last().Key + 2.0))
+		{
+			Shutdown(TEXT("replay finished"));
+		}
+		return;
+	}
 	UpdateLipSync();
 
 	ReceiveViews();
@@ -908,6 +1189,16 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	}
 
 	TArray<int16> Pcm;
+	if (bTestInput)
+	{
+		// The file in real time, then silence (the microphone also sends all the time).
+		const int64 Due = int64((Now - TestStart) * LiveSampleRate);
+		for (; TestSent < Due; ++TestSent)
+		{
+			Pcm.Add(TestSent < TestPcm.Num() ? TestPcm[TestSent] : 0);
+		}
+	}
+	else
 	{
 		FScopeLock Lock(&MicLock);
 		Pcm = MoveTemp(MicPcm);
@@ -924,13 +1215,26 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 
 void UMRLabLiveSession::Shutdown(const FString& Reason)
 {
-	if (!Socket.IsValid())
+	if (!Socket.IsValid() && !bReplaying)
 	{
 		return;
 	}
 	TSharedPtr<FLiveSocket> OldSocket = MoveTemp(Socket);
 	Socket.Reset();
 	bStarted = false;
+	bReplaying = false;
+	ReplayEvents.Reset();
+	bTestInput = false;
+	TestPcm.Reset();
+	if (DecisionCount > 0)
+	{
+		UE_LOG(LogMRLabLive, Log, TEXT("Decisions: %d, input tokens %lld (cached %lld)"), DecisionCount, DecisionInputTokens, DecisionCachedTokens);
+	}
+	DecisionCount = 0;
+	DecisionInputTokens = 0;
+	DecisionCachedTokens = 0;
+	Fragments.Reset();
+	RecordFile.Reset(); // closes the file
 	// A new session starts without context: the next one gets the current view again.
 	CloseViewSocket();
 	bViewReceived = false;
@@ -961,6 +1265,9 @@ void UMRLabLiveSession::Shutdown(const FString& Reason)
 	LipSyncModel = nullptr;
 	LipSyncCurves.Reset();
 
-	OldSocket->Close();
+	if (OldSocket.IsValid())
+	{
+		OldSocket->Close();
+	}
 	OnSessionClosed.Broadcast(Reason);
 }
