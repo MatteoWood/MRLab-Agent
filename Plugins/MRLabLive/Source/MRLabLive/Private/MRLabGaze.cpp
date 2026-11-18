@@ -263,6 +263,10 @@ void FMRLabGaze::Load(const TSharedPtr<FJsonObject>& Object)
 	MinAversion = Num(Object, TEXT("min_aversion"), MinAversion);
 	ContinueSeconds = Num(Object, TEXT("continue_seconds"), ContinueSeconds);
 	ThinkDelay = Num(Object, TEXT("think_delay"), ThinkDelay);
+	ThinkYaw = Range(Object, TEXT("think_yaw"), ThinkYaw);
+	ThinkPitch = Range(Object, TEXT("think_pitch"), ThinkPitch);
+	VisitorDelay = Range(Object, TEXT("visitor_delay"), VisitorDelay);
+	VisitorShiftFactor = Num(Object, TEXT("visitor_shift_factor"), VisitorShiftFactor);
 	ThinkAfterVoice = Range(Object, TEXT("think_after_voice"), ThinkAfterVoice);
 	YieldHold = Range(Object, TEXT("yield_hold"), YieldHold);
 	PauseGlanceEvery = Range(Object, TEXT("pause_glance_every"), PauseGlanceEvery);
@@ -370,6 +374,10 @@ void FMRLabGaze::LookAt(const FMRLabGazeInput& In, EKind NewKind, const FVector&
 	LastShiftAt = In.Now;
 
 	StartSaccade(In, Target);
+	if (bFollowVisitor && Degrees > 10.f)
+	{
+		SaccadeSeconds *= VisitorShiftFactor; // no rush to look at the visitor
+	}
 
 	// The head turns to the visitor whenever he looks at them, and joins other shifts above HeadJoinDegrees (seen from
 	// the head), a little after the eyes; small aversions are eyes only.
@@ -440,6 +448,10 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 	{
 		SpeakingEndedAt = Now;
 	}
+	if (bTurnChanged && T.State != EMRLabTurn::Listening)
+	{
+		ReturnAt = -1.0;
+	}
 	LastTurn = T.State;
 
 	auto OnVisitor = [&](EKind NewKind, double NewUntil) { LookAt(In, NewKind, Visitor, true, NewUntil); };
@@ -486,9 +498,18 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		{
 			if (Kind != EKind::Visitor)
 			{
-				OnVisitor(EKind::Visitor, Forever);
+				ReturnAt = Now + Rand(VisitorDelay); // he hears them, then turns to them without rushing
 			}
 			NextAversion = Now + Waiting(ListenAversionEvery * (1.f + In.Rapport), 1.f);
+		}
+		if (ReturnAt > 0.0)
+		{
+			if (Now >= ReturnAt)
+			{
+				ReturnAt = -1.0;
+				OnVisitor(EKind::Visitor, Forever);
+			}
+			break;
 		}
 		if (Kind == EKind::Aversion)
 		{
@@ -520,9 +541,9 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		}
 		if (Kind != EKind::Thinking && Now - T.VisitorTurnEnd >= ThinkDelay)
 		{
-			// Thinking: up and aside; large enough that the head joins a little.
-			const float Yaw = FMath::FRandRange(15.f, 25.f) * (FMath::RandBool() ? 1.f : -1.f);
-			LookAt(In, EKind::Thinking, Offset(In, Visitor, Yaw, FMath::FRandRange(5.f, 15.f)), false, Forever);
+			// Thinking: up and aside, mostly with the eyes.
+			const float Yaw = Rand(ThinkYaw) * (FMath::RandBool() ? 1.f : -1.f);
+			LookAt(In, EKind::Thinking, Offset(In, Visitor, Yaw, Rand(ThinkPitch)), false, Forever);
 			ThinkUntil = -1.0;
 		}
 		break;

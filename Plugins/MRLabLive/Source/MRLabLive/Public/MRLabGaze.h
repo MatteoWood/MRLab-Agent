@@ -119,6 +119,10 @@ struct FMRLabGaze
 	float MinAversion = 1.f;         // seconds an aversion lasts before a phrase end can end it
 	float ContinueSeconds = 1.5f;    // his voice back within this time after his turn seemed to end: the same turn
 	float ThinkDelay = 0.6f;         // Frank silent this long after the visitor's turn: thinking aversion
+	FVector2D ThinkYaw = { 10.f, 18.f };       // thinking: this far aside (mostly the eyes) ...
+	FVector2D ThinkPitch = { 4.f, 10.f };      // ... and up
+	FVector2D VisitorDelay = { 0.2f, 0.5f };   // when the visitor starts speaking he turns to them after this
+	float VisitorShiftFactor = 1.6f;           // ... and his eyes take this much longer than for other shifts
 	FVector2D ThinkAfterVoice = { 0.3f, 1.3f };
 	FVector2D YieldHold = { 3.f, 5.f };
 	FVector2D PauseGlanceEvery = { 3.f, 6.f };
@@ -160,6 +164,7 @@ private:
 	double NextScan = 0.0;
 	double NoticeAt = -1.0;
 	double ThinkUntil = -1.0;
+	double ReturnAt = -1.0;          // the visitor spoke: turn to them at this time
 	double AvertStart = -1e9;
 	double SpeakingEndedAt = -1e9;   // when his last stretch of speaking ended
 	double LastPhraseSeen = -1e9;

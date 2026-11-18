@@ -216,6 +216,9 @@ private:
 	int32 AgentAnchorMs = -1;
 	int64 AgentAnchorSample = -1;
 	double LastAgentFragment = 0.0; // FPlatformTime::Seconds() of Frank's latest transcript fragment
+	// The voice ran out without trailing silence (a pause in the stream, an interruption): the face returns to rest.
+	double LastLipSyncTime = 0.0;
+	float DryFade = 1.f;
 
 	FString UserText;
 	FString AgentText;

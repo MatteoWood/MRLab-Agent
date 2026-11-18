@@ -932,7 +932,21 @@ void UMRLabLiveSession::UpdateLipSync()
 	{
 		LipSyncCurves.Add(LipSync->Names[Index], B ? FMath::Lerp(A.Value[Index], B->Value[Index], Alpha) : A.Value[Index]);
 	}
-	// The voice can stop without trailing silence; then no newer frame comes and the last speaking weight would stay.
+	// The voice can stop without trailing silence (the stream pauses mid-word, or an interruption); then no newer frame
+	// comes: the face eases back to rest within 0.25 s (mouth closed) instead of holding the last shape, and the
+	// speaking weight falls.
+	const double Now = FPlatformTime::Seconds();
+	const float Dt = LastLipSyncTime > 0.0 ? float(FMath::Min(Now - LastLipSyncTime, 0.25)) : 0.f;
+	LastLipSyncTime = Now;
+	DryFade = (!B && bDry) ? FMath::Max(0.f, DryFade - Dt / 0.25f) : 1.f;
+	if (DryFade < 1.f)
+	{
+		const float Keep = FMath::SmoothStep(0.f, 1.f, DryFade);
+		for (TPair<FName, float>& Control : LipSyncCurves)
+		{
+			Control.Value *= Keep;
+		}
+	}
 	SpeakingWeight = B ? FMath::Lerp(A.Value.Last(), B->Value.Last(), Alpha) : (bDry ? FMath::Max(0.f, SpeakingWeight - 0.1f) : A.Value.Last());
 	Frames.RemoveAt(0, Next - 1);
 }

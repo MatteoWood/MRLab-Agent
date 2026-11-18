@@ -114,9 +114,9 @@
     "close_distance": 460, "fast_speed": 50,
     "listen_aversion_every": 7.0, "listen_aversion_length": 1.1, "speak_aversion_every": 4.8, "speak_aversion_length": 2.0,
     "aversion_degrees": [8, 15], "phrase_start_avert": 0.5, "phrase_avert_length": [1, 2], "min_aversion": 1.0, "continue_seconds": 1.5,
-    "think_delay": 0.6, "think_after_voice": [0.3, 1.3], "yield_hold": [3, 5],
+    "think_delay": 0.6, "think_yaw": [10, 18], "think_pitch": [4, 10], "visitor_delay": [0.2, 0.5], "visitor_shift_factor": 1.6, "think_after_voice": [0.3, 1.3], "yield_hold": [3, 5],
     "pause_glance_every": [3, 6], "pause_glance_length": [0.5, 1.5], "scan_every": [0.5, 2],
-    "head_join_degrees": 20, "head_delay": 0.12, "head_seconds": 1.4,
+    "head_join_degrees": 20, "head_delay": 0.12, "head_seconds": 1.8,
     "eye_degrees": {
       "_about": "Measured 2026-11-17 (Simulate, PreviewFaceControl, FACIAL_L_Eye / FACIAL_R_Eye local Z against the head bone): linear, each curve moves only its own eye; eyeParallelLookDirection changes nothing.",
       "L": { "neutral": [0, 0], "right": [9.39, 18.78, 28.17, 37.56], "left": [-10.57, -21.13, -31.70, -42.26], "up": [7.42, 14.84, 22.26, 29.68], "down": [-9.97, -19.93, -29.90, -39.87] },
