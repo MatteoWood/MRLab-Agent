@@ -218,8 +218,8 @@ bool UMRLabBehaviorComponent::LoadSettings()
 	}
 
 	bLoaded = true;
-	UE_LOG(LogMRLabBehavior, Log, TEXT("Behaviour: %d expression categories, %d baseline controls, strength %.2f, explicit moods %s, %d own gaze points (%s)"),
-		Categories.Num(), Baseline.Num(), Strength, bExplicitMoods ? TEXT("on") : TEXT("off"), Gaze.OwnPoints.Num(), *Path);
+	UE_LOG(LogMRLabBehavior, Log, TEXT("Behaviour: %d expression categories, %d baseline controls, strength %.2f, explicit moods %s, %d own gaze regions (%s)"),
+		Categories.Num(), Baseline.Num(), Strength, bExplicitMoods ? TEXT("on") : TEXT("off"), Gaze.OwnRegions.Num(), *Path);
 	return true;
 }
 

@@ -85,8 +85,18 @@ struct FMRLabGaze
 {
 	enum class EKind : uint8 { Visitor, Own, Aversion, Thinking, Glance };
 
+	struct FRegion { FVector Min = FVector::ZeroVector; FVector Max = FVector::ZeroVector; float Weight = 1.f; };
+
 	// Settings ("gaze" in Config/MRLabBehavior.json).
-	TArray<FVector> OwnPoints;       // Frank's own business: (forward, left, up) cm from his feet
+	TArray<FRegion> OwnRegions;      // Frank's own business: boxes of (forward, left, up) cm from his feet
+	float NearDegrees = 20.f;        // the next own point is usually within about this angle of the current one
+	float FarChance = 0.2f;          // ... except with this probability (anywhere)
+	float EyeShiftBase = 0.08f;      // eye movement: seconds + seconds per degree, eased in and out
+	float EyeShiftPerDegree = 0.006f;
+	float StepDegrees = 20.f;        // own-business shifts larger than this go through in-between points
+	FVector2D StepDwell = { 0.25f, 0.7f };
+	FVector2D JitterEvery = { 0.8f, 2.5f };    // small eye movements while he holds an own point, an aversion or a thought
+	FVector2D JitterDegrees = { 0.5f, 2.f };
 	FVector2D OwnFixation = { 2.f, 6.f };
 	FVector2D GlanceInterval = { 8.f, 20.f };
 	FVector2D GlanceLength = { 0.5f, 2.f };
@@ -110,7 +120,7 @@ struct FMRLabGaze
 	FVector2D ScanEvery = { 0.5f, 2.f };
 	float HeadJoinDegrees = 20.f;
 	float HeadDelay = 0.05f;
-	float HeadSeconds = 0.35f;       // time constant of the head target
+	float HeadSeconds = 0.9f;        // the head eases in and out and is 95 % there after this (two critically damped stages)
 	FVector FallbackPoint = { 300.f, 0.f, 172.f }; // where a visitor is assumed when nobody is tracked (forward, left, up)
 	FMRLabEyeTable Eyes[2];          // left, right
 
@@ -131,7 +141,9 @@ private:
 	FVector Local(const FMRLabGazeInput& In, const FVector& Point) const; // (forward, left, up) -> world
 	FVector VisitorPoint(const FMRLabGazeInput& In) const;
 	FVector Offset(const FMRLabGazeInput& In, const FVector& Around, float Yaw, float Pitch) const;
-	void LookAt(const FMRLabGazeInput& In, EKind NewKind, const FVector& Point, bool bTrackVisitor, double Until);
+	void LookAt(const FMRLabGazeInput& In, EKind NewKind, const FVector& Point, bool bTrackVisitor, double Until, bool bSteps = false);
+	void StartSaccade(const FMRLabGazeInput& In, const FVector& To);
+	FVector RandomOwnPoint(const FMRLabGazeInput& In) const;
 	void ChooseOwn(const FMRLabGazeInput& In, double Until);
 
 	bool bStarted = false;
@@ -146,7 +158,11 @@ private:
 	double AvertStart = -1e9;
 	double SpeakingEndedAt = -1e9;   // when his last stretch of speaking ended
 	double LastPhraseSeen = -1e9;
-	int32 OwnIndex = -1;
+	TArray<FVector> Waypoints;       // in-between points of a large own-business shift, the last is the target
+	double NextWaypointAt = -1.0;
+	double NextJitter = 0.0;
+	FVector Fixation = FVector::ZeroVector; // where the eyes go now (a waypoint, the target, or the target moved a little)
+	FVector SaccadeEnd = FVector::ZeroVector;
 	bool bTrackVisitor = false;      // the target follows the visitor
 	FVector Scan = FVector::ZeroVector; // small offset on the visitor's face
 	FVector Target = FVector::ZeroVector;
@@ -157,6 +173,9 @@ private:
 	float SaccadeSeconds = 0.f;
 	// Head.
 	FVector HeadAnchor = FVector::ZeroVector;
+	bool bHeadInit = false;
+	float HeadYaw = 0.f, HeadPitch = 0.f, HeadYawVel = 0.f, HeadPitchVel = 0.f, HeadDist = 300.f;
+	float HeadYawA = 0.f, HeadPitchA = 0.f, HeadYawVelA = 0.f, HeadPitchVelA = 0.f; // first of the two stages
 	bool bHeadFollowsVisitor = false;
 	double HeadMoveAt = -1e9;
 	FVector PendingAnchor = FVector::ZeroVector;

@@ -96,8 +96,18 @@
     "phrase_pause_seconds": 0.35, "yield_max_seconds": 5.0, "conversation_seconds": 15.0
   },
   "gaze": {
-    "_about": "Where Frank looks (README 4.10, D90). Points are (forward, left, up) in cm from his feet, within reach of eyes plus head (body still): at most about 40 deg to the side; ranges are [min, max] seconds unless named degrees. eye_degrees: measured eye rotation per eye look curve at 0.25, 0.5, 0.75, 1.0 (+ right / up), and each eye's rest direction, in the head bone's frame.",
-    "own_points": [[500, 150, 165], [500, -200, 150], [260, 40, 0], [220, -100, 0], [300, 220, 170], [300, -230, 160], [300, 40, 290], [70, 10, 70]],
+    "_about": "Where Frank looks (README 4.10, D90). Own business: random points in own_regions (boxes of (forward, left, up) in cm from his feet, within reach of eyes plus head, at most about 40 deg to the side), usually within near_degrees of where he looks; eye movements take eye_shift_base + eye_shift_per_degree seconds, eased in and out; own shifts above step_degrees go through in-between points (step_dwell); small movements around a held point (jitter); the head eases in and out and is 95 % there after head_seconds; ranges are [min, max] seconds unless named degrees. eye_degrees: measured eye rotation per eye look curve at 0.25, 0.5, 0.75, 1.0 (+ right / up), and each eye's rest direction, in the head bone's frame.",
+    "own_regions": [
+      { "min": [400, -250, 120], "max": [700, 250, 220], "weight": 3.0, "_about": "out through the wall opening" },
+      { "min": [180, -100, 0], "max": [400, 100, 5], "weight": 1.5, "_about": "floor ahead" },
+      { "min": [250, 120, 80], "max": [400, 200, 220], "weight": 1.0, "_about": "his room, left" },
+      { "min": [250, -200, 80], "max": [400, -120, 220], "weight": 1.0, "_about": "his room, right" },
+      { "min": [250, -120, 270], "max": [450, 120, 300], "weight": 0.5, "_about": "ceiling lights" },
+      { "min": [60, -20, 85], "max": [90, 20, 100], "weight": 0.2, "_about": "his hands" }
+    ],
+    "near_degrees": 20, "far_chance": 0.2,
+    "eye_shift_base": 0.08, "eye_shift_per_degree": 0.006, "step_degrees": 20, "step_dwell": [0.25, 0.7],
+    "jitter_every": [0.8, 2.5], "jitter_degrees": [0.5, 2.0],
     "fallback_point": [300, 0, 172],
     "own_fixation": [2, 6], "glance_interval": [8, 20], "glance_length": [0.5, 2], "notice_delay": [0.2, 0.5],
     "close_distance": 460, "fast_speed": 50,
@@ -105,7 +115,7 @@
     "aversion_degrees": [8, 15], "phrase_start_avert": 0.5, "phrase_avert_length": [1, 2], "min_aversion": 1.0, "continue_seconds": 1.5,
     "think_delay": 0.6, "think_after_voice": [0.3, 1.3], "yield_hold": [3, 5],
     "pause_glance_every": [3, 6], "pause_glance_length": [0.5, 1.5], "scan_every": [0.5, 2],
-    "head_join_degrees": 20, "head_delay": 0.05, "head_seconds": 0.35,
+    "head_join_degrees": 20, "head_delay": 0.05, "head_seconds": 0.9,
     "eye_degrees": {
       "_about": "Measured 2026-11-17 (Simulate, PreviewFaceControl, FACIAL_L_Eye / FACIAL_R_Eye local Z against the head bone): linear, each curve moves only its own eye; eyeParallelLookDirection changes nothing.",
       "L": { "neutral": [0, 0], "right": [9.39, 18.78, 28.17, 37.56], "left": [-10.57, -21.13, -31.70, -42.26], "up": [7.42, 14.84, 22.26, 29.68], "down": [-9.97, -19.93, -29.90, -39.87] },
