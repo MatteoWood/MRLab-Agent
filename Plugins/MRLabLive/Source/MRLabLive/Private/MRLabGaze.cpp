@@ -232,15 +232,16 @@ void FMRLabGaze::Load(const TSharedPtr<FJsonObject>& Object)
 	FarChance = Num(Object, TEXT("far_chance"), FarChance);
 	EyeShiftBase = Num(Object, TEXT("eye_shift_base"), EyeShiftBase);
 	EyeShiftPerDegree = Num(Object, TEXT("eye_shift_per_degree"), EyeShiftPerDegree);
-	StepDegrees = Num(Object, TEXT("step_degrees"), StepDegrees);
-	StepDwell = Range(Object, TEXT("step_dwell"), StepDwell);
+	WanderSpeed = Range(Object, TEXT("wander_speed"), WanderSpeed);
+	WanderDwell = Range(Object, TEXT("wander_dwell"), WanderDwell);
+	EyeHopEvery = Range(Object, TEXT("eye_hop_every"), EyeHopEvery);
+	EyeLead = Range(Object, TEXT("eye_lead"), EyeLead);
 	JitterEvery = Range(Object, TEXT("jitter_every"), JitterEvery);
 	JitterDegrees = Range(Object, TEXT("jitter_degrees"), JitterDegrees);
 	if (Object->TryGetArrayField(TEXT("fallback_point"), List) && List->Num() == 3)
 	{
 		FallbackPoint = FVector((*List)[0]->AsNumber(), (*List)[1]->AsNumber(), (*List)[2]->AsNumber());
 	}
-	OwnFixation = Range(Object, TEXT("own_fixation"), OwnFixation);
 	GlanceInterval = Range(Object, TEXT("glance_interval"), GlanceInterval);
 	GlanceLength = Range(Object, TEXT("glance_length"), GlanceLength);
 	NoticeDelay = Range(Object, TEXT("notice_delay"), NoticeDelay);
@@ -344,17 +345,17 @@ void FMRLabGaze::StartSaccade(const FMRLabGazeInput& In, const FVector& To)
 	Fixation = To;
 }
 
-void FMRLabGaze::LookAt(const FMRLabGazeInput& In, EKind NewKind, const FVector& Point, bool bFollowVisitor, double NewUntil, bool bSteps)
+void FMRLabGaze::LookAt(const FMRLabGazeInput& In, EKind NewKind, const FVector& Point, bool bFollowVisitor, double NewUntil)
 {
 	const FVector Mid = (In.EyeL + In.EyeR) * 0.5;
 	Kind = NewKind;
 	Until = NewUntil;
 	bTrackVisitor = bFollowVisitor;
+	bWander = false;
 	Scan = FVector::ZeroVector;
 	NextScan = In.Now + Rand(ScanEvery);
 	NextJitter = In.Now + Rand(JitterEvery);
 	Target = Point;
-	Waypoints.Reset();
 
 	const FVector From = (GazePoint - Mid).GetSafeNormal();
 	const FVector To = (Target - Mid).GetSafeNormal();
@@ -362,31 +363,14 @@ void FMRLabGaze::LookAt(const FMRLabGazeInput& In, EKind NewKind, const FVector&
 	LastShiftDegrees = Degrees;
 	LastShiftAt = In.Now;
 
-	// A large shift of his own goes through one or two in-between points, a little off the direct path.
-	const int32 Steps = bSteps && StepDegrees > 0.f ? FMath::Clamp(FMath::CeilToInt(Degrees / StepDegrees), 1, 3) : 1;
-	if (Steps > 1)
-	{
-		const float FromDistance = (GazePoint - Mid).Size();
-		const float ToDistance = (Target - Mid).Size();
-		const FQuat Whole = FQuat::FindBetweenNormals(From, To);
-		for (int32 Step = 1; Step < Steps; ++Step)
-		{
-			const float F = float(Step) / Steps;
-			const FVector Dir = FQuat::Slerp(FQuat::Identity, Whole, F).RotateVector(From);
-			const FVector OnPath = Mid + Dir * FMath::Lerp(FromDistance, ToDistance, F);
-			Waypoints.Add(Offset(In, OnPath, FMath::FRandRange(-4.f, 4.f), FMath::FRandRange(-4.f, 4.f)));
-		}
-		Until += (Steps - 1) * (StepDwell.X + StepDwell.Y) * 0.5;
-	}
-	Waypoints.Add(Target);
-	StartSaccade(In, Waypoints[0]);
-	NextWaypointAt = In.Now + SaccadeSeconds + Rand(StepDwell);
+	StartSaccade(In, Target);
 
-	// The head joins shifts above HeadJoinDegrees (seen from the head), a little after the eyes.
+	// The head turns to the visitor whenever he looks at them, and joins other shifts above HeadJoinDegrees (seen from
+	// the head), a little after the eyes; small aversions are eyes only.
 	const FVector HeadPos = In.Head.GetLocation();
 	const float HeadAngle = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(
 		FVector::DotProduct((Target - HeadPos).GetSafeNormal(), (HeadAnchor - HeadPos).GetSafeNormal()), -1.f, 1.f)));
-	if (HeadAngle > HeadJoinDegrees)
+	if (bFollowVisitor || HeadAngle > HeadJoinDegrees)
 	{
 		PendingAnchor = Target;
 		bPendingFollowsVisitor = bFollowVisitor;
@@ -414,16 +398,19 @@ FVector FMRLabGaze::RandomOwnPoint(const FMRLabGazeInput& In) const
 	return Local(In, FallbackPoint);
 }
 
-void FMRLabGaze::ChooseOwn(const FMRLabGazeInput& In, double NewUntil)
+FVector FMRLabGaze::WanderPoint(const FVector& Mid, double Time) const
 {
-	if (OwnRegions.Num() == 0)
-	{
-		LookAt(In, EKind::Own, Local(In, FallbackPoint), false, NewUntil);
-		return;
-	}
-	// Mostly a point near where he looks now (not the same spot), sometimes anywhere in his room.
+	const float S = Smooth(WanderSeconds > 0.f ? float((Time - WanderStart) / WanderSeconds) : 1.f);
+	const FVector Dir = FQuat::Slerp(FQuat::Identity, FQuat::FindBetweenNormals(WanderFromDir, WanderToDir), S).RotateVector(WanderFromDir);
+	return Mid + Dir * FMath::Lerp(WanderFromDist, WanderToDist, S);
+}
+
+void FMRLabGaze::ChooseOwn(const FMRLabGazeInput& In)
+{
 	const FVector Mid = (In.EyeL + In.EyeR) * 0.5;
-	const FVector Current = (GazePoint - Mid).GetSafeNormal();
+	const FVector From = bWander ? Attention : GazePoint;
+	// Mostly a point near where his attention is (not the same spot), sometimes anywhere in his room.
+	const FVector Current = (From - Mid).GetSafeNormal();
 	const bool bAnywhere = FMath::FRand() < FarChance;
 	FVector Best = RandomOwnPoint(In);
 	float BestScore = -1.f;
@@ -438,7 +425,34 @@ void FMRLabGaze::ChooseOwn(const FMRLabGazeInput& In, double NewUntil)
 			Best = Candidate;
 		}
 	}
-	LookAt(In, EKind::Own, Best, false, NewUntil, true);
+	if (OwnRegions.Num() == 0)
+	{
+		Best = Local(In, FallbackPoint);
+	}
+
+	// Looking around: the attention glides there (eased), the head follows it, the eyes hop along.
+	const bool bWasWandering = bWander;
+	Kind = EKind::Own;
+	bTrackVisitor = false;
+	bWander = true;
+	Target = Best;
+	WanderFromDir = Current;
+	WanderFromDist = (From - Mid).Size();
+	WanderToDir = (Best - Mid).GetSafeNormal();
+	WanderToDist = (Best - Mid).Size();
+	const float Degrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(WanderFromDir, WanderToDir), -1.f, 1.f)));
+	WanderStart = In.Now;
+	WanderSeconds = FMath::Max(0.4f, Degrees / FMath::Max(Rand(WanderSpeed), 1.f));
+	Until = In.Now + WanderSeconds + Rand(WanderDwell);
+	Attention = From;
+	HeadMoveAt = -1.0;
+	bHeadFollowsVisitor = false;
+	if (!bWasWandering)
+	{
+		NextHop = In.Now; // from the visitor or an aversion: the eyes go first
+		LastShiftDegrees = Degrees;
+		LastShiftAt = In.Now;
+	}
 }
 
 void FMRLabGaze::Update(const FMRLabGazeInput& In)
@@ -467,7 +481,7 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		Fixation = GazePoint;
 		HeadAnchor = GazePoint;
 		HeadTarget = GazePoint;
-		ChooseOwn(In, Now + Rand(OwnFixation));
+		ChooseOwn(In);
 		NextGlance = Now + Rand(GlanceInterval);
 	}
 	const bool bTurnChanged = T.State != LastTurn;
@@ -492,16 +506,16 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 	case EMRLabTurn::Outside:
 		if (bTurnChanged)
 		{
-			ChooseOwn(In, Now + Rand(OwnFixation));
+			ChooseOwn(In);
 			NextGlance = Now + Rand(GlanceInterval);
 		}
 		if (bArrived)
 		{
 			NoticeAt = Now + Rand(NoticeDelay);
 		}
-		if (In.bTracked)
 		{
-			const bool bAlert = (In.Visitor - Mid).Size() < CloseDistance || VisitorSpeed > FastSpeed;
+			// Someone is assumed in front even without tracking (owner, 2026-11-18): then at the fallback point.
+			const bool bAlert = (Visitor - Mid).Size() < CloseDistance || VisitorSpeed > FastSpeed;
 			if ((NoticeAt > 0.0 && Now >= NoticeAt) || (Kind != EKind::Glance && Now >= NextGlance))
 			{
 				NoticeAt = -1.0;
@@ -512,7 +526,7 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		}
 		if (Now >= Until)
 		{
-			ChooseOwn(In, Now + Rand(OwnFixation));
+			ChooseOwn(In);
 		}
 		break;
 
@@ -634,7 +648,7 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		}
 		if (Now >= Until)
 		{
-			ChooseOwn(In, Forever); // the glance away after waiting for an answer; the pause takes over
+			ChooseOwn(In); // the glance away after waiting for an answer; the pause takes over
 		}
 		break;
 
@@ -643,7 +657,7 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		{
 			if (Kind != EKind::Own)
 			{
-				ChooseOwn(In, Now + Rand(OwnFixation));
+				ChooseOwn(In);
 			}
 			NextGlance = Now + Rand(PauseGlanceEvery);
 		}
@@ -651,7 +665,7 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		{
 			if (Now >= Until)
 			{
-				ChooseOwn(In, Now + Rand(OwnFixation));
+				ChooseOwn(In);
 				NextGlance = Now + Rand(PauseGlanceEvery);
 			}
 		}
@@ -661,7 +675,7 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		}
 		else if (Now >= Until)
 		{
-			ChooseOwn(In, Now + Rand(OwnFixation));
+			ChooseOwn(In);
 		}
 		break;
 	}
@@ -701,19 +715,18 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 			Scan = KeepScan;
 		}
 		Target = Next;
-		if (Waypoints.Num() <= 1)
-		{
-			Fixation = Target;
-		}
+		Fixation = Target;
 	}
-	else if (Waypoints.Num() > 1)
+	else if (bWander)
 	{
-		// On the way through in-between points.
-		if (Now >= NextWaypointAt)
+		// Looking around: the head follows the gliding attention; the eyes hop to it, a little ahead, and hold.
+		Attention = WanderPoint(Mid, Now);
+		HeadAnchor = Attention;
+		if (Now >= NextHop && Now - SaccadeStart > SaccadeSeconds)
 		{
-			Waypoints.RemoveAt(0);
-			StartSaccade(In, Waypoints[0]);
-			NextWaypointAt = Now + SaccadeSeconds + Rand(StepDwell);
+			NextHop = Now + Rand(EyeHopEvery);
+			const FVector Ahead = WanderPoint(Mid, FMath::Min(Now + Rand(EyeLead), WanderStart + WanderSeconds));
+			StartSaccade(In, Offset(In, Ahead, FMath::FRandRange(-1.5f, 1.5f), FMath::FRandRange(-1.5f, 1.5f)));
 		}
 	}
 	else if (Now >= NextJitter && Now - SaccadeStart > SaccadeSeconds)

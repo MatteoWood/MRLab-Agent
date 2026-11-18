@@ -64,8 +64,11 @@ private:
 		float Activation = 0.f;
 		double HoldUntil = 0.0;
 		double LastApplied = -1e9;
-		float Shown = 0.f;      // eased activation on the face
-		float FlashLevel = 0.f; // decaying onset peak
+		float Shown = 0.f;      // activation on the face, through two critically damped stages (eased in and out)
+		float ShownVel = 0.f;
+		float ShownA = 0.f;     // first stage
+		float ShownAVel = 0.f;
+		float FlashLevel = 0.f; // decaying onset peak, added to the target before easing
 	};
 	struct FScheduled // something of Frank's that starts when his words are heard
 	{
@@ -91,6 +94,8 @@ private:
 	void Apply(FCategory& Category, float Value);
 	void RunScheduled();
 	void UpdateFace(float Speaking);
+	void HearMood(int32 Mood, float Intensity, int64 Sample, int64 Playhead, double Age, const FString& Text);
+	void UpdateMood(float DeltaTime);
 	void WriteTrace(float Speaking);
 	FCategory* FindCategory(FName Name);
 	float GroupWeight(FName Control, float Speaking) const;
@@ -135,8 +140,19 @@ private:
 	double LastVisitorFragment = 0.0; // arrival of the newest visitor fragment that was applied
 	TOptional<FCandidate> Candidate;
 	TArray<FScheduled> Scheduled;
+	// Lip sync mood: the target follows Frank's words (confirmed, held), the mood sent fades between moods.
+	float MoodHoldSeconds = 2.f;
+	float MoodRampPerSecond = 0.5f;
+	int32 TargetMood = 255;
+	float TargetIntensity = 0.f;
+	double TargetSince = -1e9;
+	int32 CandidateMood = -1;
+	float CandidateIntensity = 0.f;
+	bool bCandidateConfirmed = false; // heard twice, waits for the hold time
 	int32 CurrentMood = 255;
 	float CurrentIntensity = 0.f;
+	int32 SentMood = 255;
+	float SentIntensity = 0.f;
 	double SilentSince = 0.0;
 	FName PreviewCategory;
 	float PreviewActivation = 0.f;

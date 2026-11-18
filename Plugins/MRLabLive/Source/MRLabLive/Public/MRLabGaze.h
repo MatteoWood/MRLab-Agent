@@ -93,11 +93,12 @@ struct FMRLabGaze
 	float FarChance = 0.2f;          // ... except with this probability (anywhere)
 	float EyeShiftBase = 0.08f;      // eye movement: seconds + seconds per degree, eased in and out
 	float EyeShiftPerDegree = 0.006f;
-	float StepDegrees = 20.f;        // own-business shifts larger than this go through in-between points
-	FVector2D StepDwell = { 0.25f, 0.7f };
-	FVector2D JitterEvery = { 0.8f, 2.5f };    // small eye movements while he holds an own point, an aversion or a thought
+	FVector2D WanderSpeed = { 10.f, 25.f };    // looking around: his attention glides between own points at these deg/s
+	FVector2D WanderDwell = { 0.2f, 1.8f };    // ... and rests this long at each
+	FVector2D EyeHopEvery = { 0.3f, 1.f };     // ... while the eyes hop to it, slightly ahead (EyeLead seconds of the glide)
+	FVector2D EyeLead = { 0.2f, 0.5f };
+	FVector2D JitterEvery = { 0.8f, 2.5f };    // small eye movements while he holds an aversion or a thought
 	FVector2D JitterDegrees = { 0.5f, 2.f };
-	FVector2D OwnFixation = { 2.f, 6.f };
 	FVector2D GlanceInterval = { 8.f, 20.f };
 	FVector2D GlanceLength = { 0.5f, 2.f };
 	FVector2D NoticeDelay = { 0.2f, 0.5f };
@@ -141,10 +142,11 @@ private:
 	FVector Local(const FMRLabGazeInput& In, const FVector& Point) const; // (forward, left, up) -> world
 	FVector VisitorPoint(const FMRLabGazeInput& In) const;
 	FVector Offset(const FMRLabGazeInput& In, const FVector& Around, float Yaw, float Pitch) const;
-	void LookAt(const FMRLabGazeInput& In, EKind NewKind, const FVector& Point, bool bTrackVisitor, double Until, bool bSteps = false);
+	void LookAt(const FMRLabGazeInput& In, EKind NewKind, const FVector& Point, bool bTrackVisitor, double Until);
 	void StartSaccade(const FMRLabGazeInput& In, const FVector& To);
 	FVector RandomOwnPoint(const FMRLabGazeInput& In) const;
-	void ChooseOwn(const FMRLabGazeInput& In, double Until);
+	void ChooseOwn(const FMRLabGazeInput& In);
+	FVector WanderPoint(const FVector& Mid, double Time) const;
 
 	bool bStarted = false;
 	bool bWasTracked = false;
@@ -158,8 +160,14 @@ private:
 	double AvertStart = -1e9;
 	double SpeakingEndedAt = -1e9;   // when his last stretch of speaking ended
 	double LastPhraseSeen = -1e9;
-	TArray<FVector> Waypoints;       // in-between points of a large own-business shift, the last is the target
-	double NextWaypointAt = -1.0;
+	// Looking around: his attention glides from one own point to the next; head and eyes follow it.
+	bool bWander = false;
+	FVector WanderFromDir = FVector::XAxisVector, WanderToDir = FVector::XAxisVector;
+	float WanderFromDist = 300.f, WanderToDist = 300.f;
+	double WanderStart = 0.0;
+	float WanderSeconds = 1.f;
+	double NextHop = 0.0;
+	FVector Attention = FVector::ZeroVector;
 	double NextJitter = 0.0;
 	FVector Fixation = FVector::ZeroVector; // where the eyes go now (a waypoint, the target, or the target moved a little)
 	FVector SaccadeEnd = FVector::ZeroVector;

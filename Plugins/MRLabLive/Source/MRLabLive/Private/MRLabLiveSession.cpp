@@ -870,7 +870,7 @@ void UMRLabLiveSession::SetLipSyncMood(int32 Mood, float Intensity)
 	}
 	FScopeLock MoodScope(&LipSync->MoodLock);
 	LipSync->PendingMood = MoveTemp(MoodArray);
-	UE_LOG(LogMRLabLive, Log, TEXT("Lip sync mood %d, intensity %.2f"), Mood, Intensity);
+	UE_LOG(LogMRLabLive, Verbose, TEXT("Lip sync mood %d, intensity %.2f"), Mood, Intensity);
 }
 
 void UMRLabLiveSession::QueueVoice(const int16* Samples, int32 NumSamples)

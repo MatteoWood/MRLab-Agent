@@ -27,6 +27,23 @@ namespace
 		return Seconds <= 0.f ? Target : Value + (Target - Value) * (1.f - FMath::Exp(-3.f * DeltaTime / Seconds));
 	}
 
+	// One step of two critically damped stages in series towards Goal (95 % after Seconds): eased in and out.
+	void Ease2(float& A, float& AVel, float& X, float& XVel, float Goal, float Seconds, float DeltaTime)
+	{
+		const float W = 7.75f / FMath::Max(Seconds, 0.05f);
+		const float Dt = FMath::Min(DeltaTime, 0.25f);
+		auto Stage = [W, Dt](float& Value, float& Vel, float Target)
+		{
+			const float D = Value - Target;
+			const float C = Vel + W * D;
+			const float E = FMath::Exp(-W * Dt);
+			Value = Target + (D + C * Dt) * E;
+			Vel = (Vel - W * C * Dt) * E;
+		};
+		Stage(A, AVel, Goal);
+		Stage(X, XVel, A);
+	}
+
 	float NumberOr(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field, float Default)
 	{
 		double Value = Default;
@@ -77,6 +94,8 @@ bool UMRLabBehaviorComponent::LoadSettings()
 	FlashSeconds = NumberOr(Root, TEXT("flash_seconds"), FlashSeconds);
 	Root->TryGetBoolField(TEXT("explicit_moods"), bExplicitMoods);
 	MoodReleaseSeconds = NumberOr(Root, TEXT("mood_release_seconds"), MoodReleaseSeconds);
+	MoodHoldSeconds = NumberOr(Root, TEXT("mood_hold_seconds"), MoodHoldSeconds);
+	MoodRampPerSecond = NumberOr(Root, TEXT("mood_ramp_per_second"), MoodRampPerSecond);
 
 	const TSharedPtr<FJsonObject>* Object = nullptr;
 	if (Root->TryGetObjectField(TEXT("slow_mood"), Object))
@@ -496,13 +515,9 @@ void UMRLabBehaviorComponent::RunScheduled()
 			continue;
 		}
 		// His words are being heard now.
-		if (Item.Mood >= 0 && (Item.Mood != CurrentMood || !FMath::IsNearlyEqual(Item.Intensity, CurrentIntensity)))
+		if (Item.Mood >= 0)
 		{
-			Live->SetLipSyncMood(Item.Mood, Item.Intensity);
-			CurrentMood = Item.Mood;
-			CurrentIntensity = Item.Intensity;
-			UE_LOG(LogMRLabBehavior, Log, TEXT("Lip sync mood %d (%.2f) at voice sample %lld, playhead %lld (%.2f s after the text): \"%s\""),
-				Item.Mood, Item.Intensity, Sample, Playhead, Now - Item.Created, *Item.Text);
+			HearMood(Item.Mood, Item.Intensity, Sample, Playhead, Now - Item.Created, Item.Text);
 		}
 		if (FCategory* Category = FindCategory(Item.Category))
 		{
@@ -513,6 +528,79 @@ void UMRLabBehaviorComponent::RunScheduled()
 			TurnFinalAt = Now;
 		}
 		Scheduled.RemoveAt(Index);
+	}
+}
+
+void UMRLabBehaviorComponent::HearMood(int32 Mood, float Intensity, int64 Sample, int64 Playhead, double Age, const FString& Text)
+{
+	// A new mood needs the same answer twice in a row (or no explicit mood yet) and the current one held MoodHoldSeconds.
+	const double Now = FPlatformTime::Seconds();
+	if (Mood == TargetMood)
+	{
+		TargetIntensity = Intensity;
+		CandidateMood = -1;
+		return;
+	}
+	const bool bConfirmed = TargetMood == AutomaticMood || Mood == CandidateMood;
+	CandidateMood = Mood;
+	CandidateIntensity = Intensity;
+	bCandidateConfirmed = bConfirmed;
+	if (!bConfirmed || Now - TargetSince < MoodHoldSeconds)
+	{
+		return;
+	}
+	TargetMood = Mood;
+	TargetIntensity = Intensity;
+	TargetSince = Now;
+	CandidateMood = -1;
+	bCandidateConfirmed = false;
+	UE_LOG(LogMRLabBehavior, Log, TEXT("Lip sync mood %d (%.2f) at voice sample %lld, playhead %lld (%.2f s after the text): \"%s\""),
+		Mood, Intensity, Sample, Playhead, Age, *Text);
+}
+
+void UMRLabBehaviorComponent::UpdateMood(float DeltaTime)
+{
+	// A mood heard twice while the current one was still held takes over once the hold time is over.
+	const double Now = FPlatformTime::Seconds();
+	if (CandidateMood >= 0 && bCandidateConfirmed && Now - TargetSince >= MoodHoldSeconds)
+	{
+		TargetMood = CandidateMood;
+		TargetIntensity = CandidateIntensity;
+		TargetSince = Now;
+		CandidateMood = -1;
+		bCandidateConfirmed = false;
+		UE_LOG(LogMRLabBehavior, Log, TEXT("Lip sync mood %d (%.2f) after the hold time"), TargetMood, TargetIntensity);
+	}
+	// Fade: the mood sent moves towards the target through a low strength, never jumping between two moods.
+	constexpr float Floor = 0.05f;
+	const float Step = MoodRampPerSecond * DeltaTime;
+	if (CurrentMood == TargetMood)
+	{
+		CurrentIntensity = TargetMood == AutomaticMood ? 0.f
+			: CurrentIntensity + FMath::Clamp(TargetIntensity - CurrentIntensity, -Step, Step);
+	}
+	else if (CurrentMood == AutomaticMood)
+	{
+		CurrentMood = TargetMood;
+		CurrentIntensity = Floor;
+	}
+	else
+	{
+		CurrentIntensity -= Step;
+		if (CurrentIntensity <= Floor)
+		{
+			CurrentMood = TargetMood;
+			CurrentIntensity = TargetMood == AutomaticMood ? 0.f : Floor;
+		}
+	}
+	if (CurrentMood != SentMood || FMath::Abs(CurrentIntensity - SentIntensity) > 0.01f)
+	{
+		if (UMRLabLiveSession* Live = Session.Get())
+		{
+			Live->SetLipSyncMood(CurrentMood, CurrentIntensity);
+		}
+		SentMood = CurrentMood;
+		SentIntensity = CurrentIntensity;
 	}
 }
 
@@ -535,20 +623,20 @@ void UMRLabBehaviorComponent::TickComponent(float DeltaTime, ELevelTick TickType
 	RunScheduled();
 	const double Now = FPlatformTime::Seconds();
 
-	// Back to the voice's own mood after he has been silent for a while.
+	// Back to the voice's own mood after he has been silent for a while (faded out).
 	if (Speaking > 0.05f)
 	{
 		SilentSince = Now;
 	}
-	else if (CurrentMood != AutomaticMood && Now - SilentSince > MoodReleaseSeconds)
+	else if (TargetMood != AutomaticMood && Now - SilentSince > MoodReleaseSeconds)
 	{
-		if (UMRLabLiveSession* Writable = Session.Get())
-		{
-			Writable->SetLipSyncMood(AutomaticMood, 0.f);
-		}
-		CurrentMood = AutomaticMood;
-		CurrentIntensity = 0.f;
+		TargetMood = AutomaticMood;
+		TargetIntensity = 0.f;
+		TargetSince = Now;
+		CandidateMood = -1;
+		bCandidateConfirmed = false;
 	}
+	UpdateMood(DeltaTime);
 
 	for (FCategory& Category : Categories)
 	{
@@ -556,9 +644,13 @@ void UMRLabBehaviorComponent::TickComponent(float DeltaTime, ELevelTick TickType
 		{
 			Category.Activation = Ease(Category.Activation, 0.f, FallSeconds, DeltaTime);
 		}
-		const bool bRising = Category.Activation > Category.Shown;
-		Category.Shown = Ease(Category.Shown, Category.Activation, bRising ? (Category.Flash > 0.f ? FlashSeconds : RiseSeconds) : FallSeconds, DeltaTime);
+		// The face follows activation plus any onset peak through two eased stages: no jumps, soft start and end.
 		Category.FlashLevel = Ease(Category.FlashLevel, 0.f, FlashSeconds * 2.f, DeltaTime);
+		const float Goal = FMath::Min(1.f, Category.Activation + Category.FlashLevel);
+		const bool bRising = Goal > Category.Shown;
+		Ease2(Category.ShownA, Category.ShownAVel, Category.Shown, Category.ShownVel, Goal,
+			bRising ? (Category.Flash > 0.f ? FlashSeconds : RiseSeconds) : FallSeconds, DeltaTime);
+		Category.Shown = FMath::Clamp(Category.Shown, 0.f, 1.f);
 	}
 	const float Return = 1.f - FMath::Exp(-DeltaTime / FMath::Max(ReturnSeconds, 1.f));
 	Valence += (BaseValence - Valence) * Return;
@@ -693,7 +785,7 @@ void UMRLabBehaviorComponent::UpdateFace(float Speaking)
 	{
 		const float Weight = !PreviewCategory.IsNone()
 			? (Category.Name == PreviewCategory ? PreviewActivation : 0.f)
-			: FMath::Min(1.f, Category.Shown + Category.FlashLevel);
+			: Category.Shown;
 		if (Weight <= 0.001f)
 		{
 			continue;
@@ -757,7 +849,7 @@ void UMRLabBehaviorComponent::WriteTrace(float Speaking)
 	for (const FCategory& Category : Categories)
 	{
 		Line += FString::Printf(TEXT("%s\"%s\":[%.3f,%.3f]"), bFirst ? TEXT("") : TEXT(","), *Category.Name.ToString(), Category.Activation,
-			FMath::Min(1.f, Category.Shown + Category.FlashLevel));
+			Category.Shown);
 		bFirst = false;
 	}
 	Line += TEXT("},\"face\":{");
