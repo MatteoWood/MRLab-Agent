@@ -2,11 +2,16 @@
 
 #include "CoreMinimal.h"
 #include "Animation/AnimNodeBase.h"
+#include "BoneContainer.h"
 #include "AnimNode_MRLabLife.generated.h"
 
+class UMRLabBehaviorComponent;
+
 /**
- * Frank's procedural body layer (README section 5, Step 9D). For now it passes its input pose through and checks the
- * plumbing: it reads the game thread state in PreUpdate, which lets the AnimBP update on worker threads.
+ * Frank's procedural body layer (README 4.10, Step 9D). So far: the breath in before he speaks (D114), from the MRLab
+ * behaviour component on the owning actor: the upper spine extends a little and the shoulders rise. Place it on the
+ * local pose before the head's Look At nodes. The values are gathered in PreUpdate on the game thread, so the AnimBP
+ * can update on worker threads.
  */
 USTRUCT(BlueprintInternalUseOnly)
 struct MRLABLIVE_API FAnimNode_MRLabLife : public FAnimNode_Base
@@ -24,5 +29,13 @@ struct MRLABLIVE_API FAnimNode_MRLabLife : public FAnimNode_Base
 	virtual void PreUpdate(const UAnimInstance* InAnimInstance) override;
 
 private:
-	bool bReported = false;
+	TWeakObjectPtr<UMRLabBehaviorComponent> Behavior;
+	bool bSearched = false;
+	// Written in PreUpdate, read in Evaluate_AnyThread: degrees and centimetres for this frame.
+	float ChestDegrees = 0.f;
+	float ChestLift = 0.f;
+	float ShoulderDegrees = 0.f;
+	FBoneReference Spine[3] = { FBoneReference(TEXT("spine_03")), FBoneReference(TEXT("spine_04")), FBoneReference(TEXT("spine_05")) };
+	FBoneReference Clavicle[2] = { FBoneReference(TEXT("clavicle_l")), FBoneReference(TEXT("clavicle_r")) };
+	FBoneReference UpperArm[2] = { FBoneReference(TEXT("upperarm_l")), FBoneReference(TEXT("upperarm_r")) };
 };

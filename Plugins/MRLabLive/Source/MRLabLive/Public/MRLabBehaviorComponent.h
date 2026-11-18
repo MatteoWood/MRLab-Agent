@@ -48,6 +48,18 @@ public:
 	/** Blink controls; the node takes the larger of these and the lip sync's. */
 	const TArray<TPair<FName, float>>& GetBlinkCurves() const { return BlinkCurves; }
 
+	/** Breath in before he speaks (D114), for the MRLab Life node: 0 at rest, 1 a full breath in. Game thread. */
+	float GetBreath() const { return Breath; }
+	/** At a full breath: the upper spine extends by this many degrees in all, the chest rises by this many cm (and comes
+	 * forward by half), each clavicle rises by this many degrees. */
+	float GetBreathChestDegrees() const { return BreathChestDegrees; }
+	float GetBreathChestLift() const { return BreathChestLift; }
+	float GetBreathShoulderDegrees() const { return BreathShoulderDegrees; }
+
+	/** Tests: hold the breath at a level 0..1 (also without a session); a negative level releases it. */
+	UFUNCTION(BlueprintCallable, Category = "MRLab Behaviour")
+	void PreviewBreath(float Level);
+
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
@@ -101,6 +113,7 @@ private:
 	float GroupWeight(FName Control, float Speaking) const;
 	void FindParts();
 	void UpdateEyes(float DeltaTime, float Speaking);
+	void UpdateBreath(double Now, float DeltaTime);
 
 	TWeakObjectPtr<UMRLabLiveSession> Session;
 	FDelegateHandle DecisionHandle;
@@ -198,6 +211,35 @@ private:
 	int32 LastFrankDecisionMs = -1; // start_ms of the words bLastFrankFinished is about
 	double LastInterruptAt = -1e9;
 	double ListenAt = -1.0;
+	// Breath in before he speaks (owner, D114; "breath" in the settings). Cued when the visitor's turn ends or the first
+	// text of a new utterance of his arrives: BreathYieldDelay or BreathDelay s later he breathes in over BreathInSeconds,
+	// holds until his voice is heard (at most BreathHoldMax s, then lets it out over BreathOutRelease s; also when the
+	// visitor goes on), and lets it out over BreathOutSpeaking s while he speaks. His voice is never held back for it:
+	// if it comes first, no breath.
+	float BreathDelay = 0.f;
+	float BreathYieldDelay = 0.5f;
+	float BreathWait = 0.f;
+	float BreathInSeconds = 0.7f;
+	float BreathHoldMax = 3.f;
+	float BreathOutSpeaking = 3.f;
+	float BreathOutRelease = 1.5f;
+	float BreathChestDegrees = 0.6f;
+	float BreathChestLift = 0.4f;
+	float BreathShoulderDegrees = 2.f;
+	float BreathHeadDegrees = 1.5f; // the head target tilts up by this at a full breath
+	float BreathSmoothSeconds = 0.15f;
+	enum class EBreath : uint8 { Rest, Waiting, In, Out };
+	EBreath BreathPhase = EBreath::Rest;
+	double BreathCue = 0.0;      // when the current breath was cued
+	double BreathTextSeen = 0.0; // newest utterance text time already seen
+	EMRLabTurn BreathTurn = EMRLabTurn::Outside;
+	double BreathPhaseAt = 0.0;
+	float BreathFrom = 0.f;      // level when the phase started
+	float BreathOutFor = 1.f;    // seconds of the current breath out
+	float BreathRaw = 0.f;       // level by the phases, before smoothing
+	float Breath = 0.f;
+	float BreathVel = 0.f;
+	float PreviewBreathLevel = -1.f;
 	float NoticeValue = 0.f;
 	double GazeCost = 0.0;
 	int32 GazeTicks = 0;

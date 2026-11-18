@@ -328,10 +328,11 @@ struct FLipSync
 			while (!bStop)
 			{
 				Wake->Wait(100);
-				TArray<float> Voice;
-				while (!bStop && Input.Dequeue(Voice))
+				TPair<TArray<float>, int64> Item;
+				while (!bStop && Input.Dequeue(Item))
 				{
-					Process(Voice);
+					Silence(Item.Value);
+					Process(Item.Key);
 				}
 			}
 		});
@@ -352,11 +353,35 @@ struct FLipSync
 		}
 	}
 
-	// Called from the game thread.
-	void Add(TArray<float>&& Voice)
+	// Called from the game thread. HeardSilence: samples (24 kHz) of silence heard since the previous voice, because
+	// the wave ran dry; they were never queued, so they do not count as solved voice.
+	void Add(TArray<float>&& Voice, int64 HeardSilence)
 	{
-		Input.Enqueue(MoveTemp(Voice));
+		Input.Enqueue(TPair<TArray<float>, int64>(MoveTemp(Voice), HeardSilence));
 		Wake->Trigger();
+	}
+
+	// Silence that was heard between two pieces of voice: the model's input window and the mouth gate see it, so the
+	// next frames do not animate the old words (e.g. the rest of an answer cut by the visitor, which was never heard).
+	// The model runs are skipped (those moments are past); the model state stays, so no restart blink.
+	void Silence(int64 Samples)
+	{
+		const int32 Num = int32(FMath::Min<int64>(Samples * 16000 / LiveSampleRate, 16000)) / 320 * 320;
+		if (Num <= 0)
+		{
+			return;
+		}
+		FMemory::Memmove(AudioBuffer.GetData(), AudioBuffer.GetData() + Num, (16000 - Num) * sizeof(float));
+		FMemory::Memzero(AudioBuffer.GetData() + 16000 - Num, Num * sizeof(float));
+		for (int32 Steps = Num / 320; Steps > 0; --Steps)
+		{
+			StepVoiced.Add(false);
+			if (StepVoiced.Num() > LookaheadMs / 20 + 3)
+			{
+				StepVoiced.RemoveAt(0);
+			}
+			MouthWeight = FMath::Max(0.f, MouthWeight - MouthClosePerStep);
+		}
 	}
 
 	// Takes the next voice samples (24 kHz) and adds one frame of face controls per 20 ms.
@@ -481,7 +506,7 @@ struct FLipSync
 	double SolveSeconds = 0.0;
 	double SolveMaxSeconds = 0.0;
 
-	TQueue<TArray<float>, EQueueMode::Spsc> Input;
+	TQueue<TPair<TArray<float>, int64>, EQueueMode::Spsc> Input; // voice, silence heard before it
 	FEvent* Wake = FPlatformProcess::GetSynchEventFromPool(false);
 	std::atomic<bool> bStop = false;
 	TFuture<void> Worker;
@@ -688,6 +713,7 @@ void UMRLabLiveSession::HandleMessage(const FString& Message)
 			{
 				AgentAnchorMs = StartMs;
 				AgentAnchorSample = -1;
+				UtteranceTextAt = Now;
 			}
 			if (bLastSpeakerUser && VoiceCut != EVoiceCut::None)
 			{
@@ -1019,6 +1045,9 @@ void UMRLabLiveSession::EnqueueVoice(const int16* Samples, int32 NumSamples)
 		AgentAnchorSample += VoiceDelaySamples; // the start of his utterance is still to come: the delay goes in front
 	}
 	Pcm.Append(Samples, NumSamples);
+	// Silence heard since the previous voice: the wave ran dry, and the part silenced after a word end (D113).
+	const int64 HeardSilence = VoiceWave->TakeDrySamples() + SilencedSamples;
+	SilencedSamples = 0;
 	VoiceWave->Add(Pcm.GetData(), Pcm.Num());
 	VoiceQueued += Pcm.Num();
 
@@ -1030,7 +1059,7 @@ void UMRLabLiveSession::EnqueueVoice(const int16* Samples, int32 NumSamples)
 		{
 			Floats[Index] = Pcm[Index] / 32768.f;
 		}
-		LipSync->Add(MoveTemp(Floats));
+		LipSync->Add(MoveTemp(Floats), HeardSilence);
 	}
 }
 
@@ -1060,19 +1089,57 @@ void UMRLabLiveSession::UpdateLipSync()
 	const TPair<int64, TArray<float>>& A = Frames[Next - 1];
 	const TPair<int64, TArray<float>>* B = Next < Frames.Num() ? &Frames[Next] : nullptr;
 	const float Alpha = B ? float(Playhead - A.Key) / float(B->Key - A.Key) : 0.f;
-	for (int32 Index = 0; Index < LipSync->Names.Num(); ++Index)
+
+	// Silenced after a word end (D113): the frames after it animate words that are never heard. The face of the
+	// moment the word ended is held (and eased to rest below) until his voice goes on.
+	const bool bInMute = Playhead >= MuteFrom && Playhead < MuteTo;
+	if (bInMute && !bMuteHeld)
 	{
-		LipSyncCurves.Add(LipSync->Names[Index], B ? FMath::Lerp(A.Value[Index], B->Value[Index], Alpha) : A.Value[Index]);
+		int32 First = 0;
+		while (First + 1 < Frames.Num() && Frames[First + 1].Key <= MuteFrom)
+		{
+			++First;
+		}
+		const TPair<int64, TArray<float>>& HA = Frames[First];
+		const TPair<int64, TArray<float>>* HB = First + 1 < Frames.Num() && HA.Key <= MuteFrom ? &Frames[First + 1] : nullptr;
+		const float HAlpha = HB ? FMath::Clamp(float(MuteFrom - HA.Key) / float(HB->Key - HA.Key), 0.f, 1.f) : 0.f;
+		MuteHold.Reset();
+		for (int32 Index = 0; Index < LipSync->Names.Num(); ++Index)
+		{
+			MuteHold.Add(LipSync->Names[Index], HB ? FMath::Lerp(HA.Value[Index], HB->Value[Index], HAlpha) : HA.Value[Index]);
+		}
+		bMuteHeld = true;
+	}
+	else if (bMuteHeld && !bInMute && B && !bDry)
+	{
+		bMuteHeld = false; // new voice after the silenced part
+	}
+	if (bMuteHeld)
+	{
+		LipSyncCurves = MuteHold;
+	}
+	else
+	{
+		for (int32 Index = 0; Index < LipSync->Names.Num(); ++Index)
+		{
+			LipSyncCurves.Add(LipSync->Names[Index], B ? FMath::Lerp(A.Value[Index], B->Value[Index], Alpha) : A.Value[Index]);
+		}
 	}
 	// The voice can stop without trailing silence (the stream pauses mid-word, or an interruption); then no newer frame
 	// comes: the face eases back to rest within 0.25 s (mouth closed) instead of holding the last shape, and the
-	// speaking weight falls.
+	// speaking weight falls. It comes back over 0.1 s once frames of new voice are there (inside the lip sync delay
+	// put in front of it), never with the old frame: before, it jumped back at once, and the mouth opened in silence.
 	const double Now = FPlatformTime::Seconds();
 	const float Dt = LastLipSyncTime > 0.0 ? float(FMath::Min(Now - LastLipSyncTime, 0.25)) : 0.f;
 	LastLipSyncTime = Now;
-	// Silenced after a word end (D113): the same, from the end of the word.
-	const bool bMuted = Playhead >= MuteFrom && Playhead < MuteTo;
-	DryFade = ((!B && bDry) || bMuted) ? FMath::Max(0.f, DryFade - Dt / 0.25f) : 1.f;
+	if (bMuteHeld || (!B && bDry))
+	{
+		DryFade = FMath::Max(0.f, DryFade - Dt / 0.25f);
+	}
+	else if (B)
+	{
+		DryFade = FMath::Min(1.f, DryFade + Dt / 0.1f);
+	}
 	if (DryFade < 1.f)
 	{
 		const float Keep = FMath::SmoothStep(0.f, 1.f, DryFade);
@@ -1081,7 +1148,7 @@ void UMRLabLiveSession::UpdateLipSync()
 			Control.Value *= Keep;
 		}
 	}
-	SpeakingWeight = bMuted ? FMath::Max(0.f, SpeakingWeight - 0.1f)
+	SpeakingWeight = bMuteHeld ? FMath::Max(0.f, SpeakingWeight - 0.1f)
 		: B ? FMath::Lerp(A.Value.Last(), B->Value.Last(), Alpha) : (bDry ? FMath::Max(0.f, SpeakingWeight - 0.1f) : A.Value.Last());
 	Frames.RemoveAt(0, Next - 1);
 }
@@ -1136,6 +1203,7 @@ void UMRLabLiveSession::StopAtWordEnd()
 			VoiceWave->SilenceFrom(Keep, SilenceFrame);
 			MuteFrom = VoiceQueued - Waiting.Num() + Keep;
 			MuteTo = VoiceQueued;
+			SilencedSamples = MuteTo - MuteFrom; // heard as silence: the lip sync is told before the next voice
 			VoiceCut = EVoiceCut::Dropping;
 			UE_LOG(LogMRLabLive, Log, TEXT("Voice stopped at a word end, %.2f s after the cut"), Keep / float(LiveSampleRate));
 			return;
@@ -1196,7 +1264,16 @@ int32 UMRLabVoiceWave::OnGeneratePCMAudio(TArray<uint8>& OutAudio, int32 NumSamp
 		FMemory::Memcpy(OutAudio.GetData(), Buffer.GetData() + Read, Count * sizeof(int16));
 		Read += Count;
 	}
+	DrySamples += NumSamples - FMath::Max(0, Count);
 	return NumSamples;
+}
+
+int64 UMRLabVoiceWave::TakeDrySamples()
+{
+	FScopeLock ScopeLock(&Lock);
+	const int64 Dry = DrySamples;
+	DrySamples = 0;
+	return Dry;
 }
 
 void UMRLabLiveSession::AddTranscript(bool bUser, const FString& Delta)
@@ -1590,6 +1667,8 @@ void UMRLabLiveSession::Shutdown(const FString& Reason)
 	LastAgentEndMs = -1;
 	VoiceCut = EVoiceCut::None;
 	MuteFrom = MuteTo = 0;
+	SilencedSamples = 0;
+	bMuteHeld = false;
 	SilentFrames = 0;
 	bTestInput = false;
 	TestPcm.Reset();

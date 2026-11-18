@@ -73,6 +73,8 @@ public:
 	void CopyWaiting(TArray<int16>& Out) const;
 	/** What waits from Offset on becomes silence; the Fade samples before Offset fade out. */
 	void SilenceFrom(int32 Offset, int32 Fade);
+	/** Samples of silence played because nothing was waiting, since the previous call. */
+	int64 TakeDrySamples();
 
 	virtual int32 OnGeneratePCMAudio(TArray<uint8>& OutAudio, int32 NumSamples) override;
 
@@ -80,6 +82,7 @@ private:
 	mutable FCriticalSection Lock;
 	TArray<int16> Buffer;
 	int32 Read = 0; // samples of Buffer already heard
+	int64 DrySamples = 0;
 };
 
 /**
@@ -143,6 +146,9 @@ public:
 
 	/** FPlatformTime::Seconds() of the latest transcript fragment of Frank (0 before the first). */
 	double LastFrankFragmentTime() const { return LastAgentFragment; }
+	/** FPlatformTime::Seconds() when the first text of Frank's newest utterance arrived (0 before the first). His voice
+	 * usually follows about 1.4 s later (README 4.13): the cue for his breath in before speaking. */
+	double FrankUtteranceTextTime() const { return UtteranceTextAt; }
 
 	/** The visitor talks over Frank (D113): his voice stops at the end of the word being heard (at most 0.5 s on),
 	 * and what the model still says of this answer is not played; his next answer plays again. */
@@ -264,6 +270,10 @@ private:
 	double CutAt = 0.0;
 	int64 MuteFrom = 0;     // voice samples silenced in the wave: their lip sync frames are not shown
 	int64 MuteTo = 0;
+	int64 SilencedSamples = 0;  // silenced, not yet told to the lip sync
+	TMap<FName, float> MuteHold; // the lip sync face when the word ended, held while the rest is silent
+	bool bMuteHeld = false;
+	double UtteranceTextAt = 0.0; // FPlatformTime::Seconds() when the first text of Frank's newest utterance arrived
 	bool WordEnds(const int16* Frame, int32 Num);
 	// The voice ran out without trailing silence (a pause in the stream, an interruption): the face returns to rest.
 	double LastLipSyncTime = 0.0;

@@ -255,6 +255,20 @@ bool UMRLabBehaviorComponent::LoadSettings()
 		InterruptLookSeconds = NumberOr(*Object, TEXT("look_seconds"), InterruptLookSeconds);
 		HeadBackDegrees = NumberOr(*Object, TEXT("head_back_degrees"), HeadBackDegrees);
 	}
+	if (Root->TryGetObjectField(TEXT("breath"), Object))
+	{
+		BreathDelay = NumberOr(*Object, TEXT("delay_after_text"), BreathDelay);
+		BreathYieldDelay = NumberOr(*Object, TEXT("delay_after_turn_end"), BreathYieldDelay);
+		BreathInSeconds = NumberOr(*Object, TEXT("in_seconds"), BreathInSeconds);
+		BreathHoldMax = NumberOr(*Object, TEXT("hold_max"), BreathHoldMax);
+		BreathOutSpeaking = NumberOr(*Object, TEXT("out_speaking"), BreathOutSpeaking);
+		BreathOutRelease = NumberOr(*Object, TEXT("out_release"), BreathOutRelease);
+		BreathChestDegrees = NumberOr(*Object, TEXT("chest_degrees"), BreathChestDegrees);
+		BreathChestLift = NumberOr(*Object, TEXT("chest_lift_cm"), BreathChestLift);
+		BreathShoulderDegrees = NumberOr(*Object, TEXT("shoulder_degrees"), BreathShoulderDegrees);
+		BreathHeadDegrees = NumberOr(*Object, TEXT("head_degrees"), BreathHeadDegrees);
+		BreathSmoothSeconds = NumberOr(*Object, TEXT("smooth_seconds"), BreathSmoothSeconds);
+	}
 	if (Root->TryGetObjectField(TEXT("turns"), Object))
 	{
 		Turns.Load(*Object);
@@ -777,6 +791,7 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 		UE_LOG(LogMRLabBehavior, Log, TEXT("Turn: %s -> %s"), MRLabTurnName(LoggedTurn), MRLabTurnName(Turns.State));
 		LoggedTurn = Turns.State;
 	}
+	UpdateBreath(Now, DeltaTime);
 
 	OverrideCurves.Reset();
 	BlinkCurves.Reset();
@@ -806,6 +821,7 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 	In.Turns = &Turns;
 	In.Arousal = Arousal;
 	In.Rapport = Rapport;
+	In.HeadPitchOffset = Breath * BreathHeadDegrees; // the head goes up a little with the breath in (D114)
 	Gaze.Update(In);
 
 	TraceModelBlink = Live ? FMath::Max(Live->LipSyncCurves.FindRef(BlinkCurveNames[0]), Live->LipSyncCurves.FindRef(BlinkCurveNames[1])) : 0.f;
@@ -852,6 +868,103 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 	}
 	GazeCost += FPlatformTime::Seconds() - Now;
 	++GazeTicks;
+}
+
+void UMRLabBehaviorComponent::UpdateBreath(double Now, float DeltaTime)
+{
+	// Breath in before he speaks (owner, D114); his voice is never held back for it. Cues: the visitor's turn ends
+	// (visitor_yielding: his answer follows 0.7 to 1.8 s later), or the first text of a new utterance of his (in the
+	// live test session only 0.04 to 0.3 s before his voice, so mostly too late on its own).
+	const UMRLabLiveSession* Live = Session.Get();
+	const double TextAt = Live ? Live->FrankUtteranceTextTime() : 0.0;
+	const bool bVoice = Turns.bFrankVoice;
+	const bool bNewText = TextAt > BreathTextSeen;
+	const bool bYielded = Turns.State == EMRLabTurn::VisitorYielding && BreathTurn != EMRLabTurn::VisitorYielding;
+	BreathTextSeen = FMath::Max(BreathTextSeen, TextAt);
+	BreathTurn = Turns.State;
+	if ((bNewText || bYielded) && !bVoice && (BreathPhase == EBreath::Rest || BreathPhase == EBreath::Out))
+	{
+		BreathPhase = EBreath::Waiting;
+		BreathCue = Now;
+		BreathWait = bYielded ? BreathYieldDelay : BreathDelay;
+		UE_LOG(LogMRLabBehavior, Log, TEXT("Breath: cue, %s"), bYielded ? TEXT("the visitor's turn ended") : TEXT("his text arrived"));
+	}
+	// The visitor goes on talking instead: he lets the breath out.
+	if ((BreathPhase == EBreath::Waiting || BreathPhase == EBreath::In) && !bVoice && Turns.State == EMRLabTurn::Listening)
+	{
+		UE_LOG(LogMRLabBehavior, Log, TEXT("Breath: let out, the visitor goes on (%.1f s after the cue)"), Now - BreathCue);
+		BreathPhase = EBreath::Out;
+		BreathPhaseAt = Now;
+		BreathFrom = BreathRaw;
+		BreathOutFor = FMath::Max(BreathOutRelease, 0.1f);
+	}
+	auto BreatheOut = [this, Now](float Seconds)
+	{
+		BreathPhase = EBreath::Out;
+		BreathPhaseAt = Now;
+		BreathFrom = BreathRaw;
+		BreathOutFor = FMath::Max(Seconds, 0.1f);
+	};
+	switch (BreathPhase)
+	{
+	case EBreath::Waiting:
+		BreathRaw = FMath::Max(0.f, BreathRaw - DeltaTime / FMath::Max(BreathOutRelease, 0.1f));
+		if (bVoice)
+		{
+			BreathPhase = EBreath::Rest;
+			UE_LOG(LogMRLabBehavior, Log, TEXT("Breath: no time to breathe in, his voice came %.2f s after the cue"), Now - BreathCue);
+		}
+		else if (Now - BreathCue >= BreathWait)
+		{
+			BreathPhase = EBreath::In;
+			BreathPhaseAt = Now;
+			BreathFrom = BreathRaw;
+		}
+		break;
+	case EBreath::In:
+		BreathRaw = FMath::Lerp(BreathFrom, 1.f, FMath::SmoothStep(0.f, BreathInSeconds, float(Now - BreathPhaseAt)));
+		if (bVoice)
+		{
+			UE_LOG(LogMRLabBehavior, Log, TEXT("Breath: his voice %.2f s after the cue, %.2f s after the breath in started (%.0f %% in)"),
+				Now - BreathCue, Now - BreathPhaseAt, BreathRaw * 100.f);
+			BreatheOut(BreathOutSpeaking);
+		}
+		else if (Now - BreathPhaseAt > BreathInSeconds + BreathHoldMax)
+		{
+			UE_LOG(LogMRLabBehavior, Log, TEXT("Breath: let out, no voice %.1f s after the breath in"), Now - BreathPhaseAt);
+			BreatheOut(BreathOutRelease);
+		}
+		break;
+	case EBreath::Out:
+		BreathRaw = FMath::Lerp(BreathFrom, 0.f, FMath::SmoothStep(0.f, BreathOutFor, float(Now - BreathPhaseAt)));
+		if (Now - BreathPhaseAt >= BreathOutFor)
+		{
+			BreathPhase = EBreath::Rest;
+		}
+		break;
+	default:
+		BreathRaw = FMath::Max(0.f, BreathRaw - DeltaTime / FMath::Max(BreathOutRelease, 0.1f));
+		break;
+	}
+	// A light critically damped smoothing (95 % after BreathSmoothSeconds), so a phase change never makes a kink.
+	const float Goal = PreviewBreathLevel >= 0.f ? PreviewBreathLevel : BreathRaw;
+	const float W = 7.75f / FMath::Max(BreathSmoothSeconds, 0.01f);
+	const float Dt = FMath::Min(DeltaTime, 0.25f);
+	const float D = Breath - Goal;
+	const float C = BreathVel + W * D;
+	const float E = FMath::Exp(-W * Dt);
+	Breath = Goal + (D + C * Dt) * E;
+	BreathVel = (BreathVel - W * C * Dt) * E;
+}
+
+void UMRLabBehaviorComponent::PreviewBreath(float Level)
+{
+	if (!bLoaded)
+	{
+		LoadSettings();
+	}
+	PreviewBreathLevel = FMath::Min(Level, 1.f);
+	UE_LOG(LogMRLabBehavior, Log, TEXT("Preview breath %.2f"), PreviewBreathLevel);
 }
 
 void UMRLabBehaviorComponent::PreviewFaceControl(FName Control, float Value)
@@ -946,6 +1059,15 @@ void UMRLabBehaviorComponent::WriteTrace(float Speaking)
 		Gaze.Curves[0][0], Gaze.Curves[0][1], Gaze.Curves[0][2], Gaze.Curves[0][3], Gaze.Curves[1][0], Gaze.Curves[1][1], Gaze.Curves[1][2], Gaze.Curves[1][3],
 		Gaze.LastShiftAt - TraceStart, Gaze.LastShiftDegrees, Blinks.Value, TraceModelBlink, Gaze.HeadTarget.X, Gaze.HeadTarget.Y, Gaze.HeadTarget.Z,
 		TraceEyeError[0], TraceEyeError[1], Blinks.OwnCount, Blinks.ModelCount);
+	// The jaw as the face gets it (lip sync plus the expression layer, README 4.11) and the breath (D114).
+	static const FName JawOpen(TEXT("CTRL_expressions_jawOpen"));
+	float LayerJaw = 0.f;
+	for (const TPair<FName, float>& Control : FaceCurves)
+	{
+		LayerJaw += Control.Key == JawOpen ? Control.Value : 0.f;
+	}
+	Line.InsertAt(Line.Len() - FCString::Strlen(TEXT("\"shown\":{")), FString::Printf(TEXT("\"jaw\":%.3f,\"breath\":%.3f,"),
+		FMath::Clamp((Live ? Live->LipSyncCurves.FindRef(JawOpen) : 0.f) + LayerJaw, 0.f, 1.f), Breath));
 	bool bFirst = true;
 	for (const FCategory& Category : Categories)
 	{

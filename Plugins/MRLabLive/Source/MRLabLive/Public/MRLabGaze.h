@@ -79,6 +79,7 @@ struct FMRLabGazeInput
 	const FMRLabTurns* Turns = nullptr;
 	float Arousal = 0.f;
 	float Rapport = 0.f;
+	float HeadPitchOffset = 0.f;                // degrees added to the head target's tilt (+ up; the breath, D114)
 };
 
 struct FMRLabGaze
