@@ -85,18 +85,23 @@ struct FMRLabGaze
 {
 	enum class EKind : uint8 { Visitor, Own, Aversion, Thinking, Glance };
 
-	struct FRegion { FVector Min = FVector::ZeroVector; FVector Max = FVector::ZeroVector; float Weight = 1.f; };
-
 	// Settings ("gaze" in Config/MRLabBehavior.json).
-	TArray<FRegion> OwnRegions;      // Frank's own business: boxes of (forward, left, up) cm from his feet
-	float NearDegrees = 20.f;        // the next own point is usually within about this angle of the current one
-	float FarChance = 0.2f;          // ... except with this probability (anywhere)
+	// Looking around: his attention drifts on a smooth random path (degrees from straight ahead), never resting on a point.
+	FVector2D WanderYaw = { -35.f, 35.f };
+	FVector2D WanderPitch = { -18.f, 12.f };
+	FVector2D WanderStep = { 6.f, 18.f };      // each new goal of the drift this far from the last one
+	FVector2D WanderEvery = { 1.5f, 4.f };     // a new goal this often (before the old one is reached)
+	float WanderSeconds = 2.5f;                // the attention eases towards its goal (95 % after this)
+	float WanderCenterPull = 0.2f;             // each new goal moves this share back towards straight ahead
+	float FarChance = 0.15f;                   // ... or anywhere within the bounds with this probability
+	float WanderDistance = 400.f;
+	FVector2D EyeHopEvery = { 0.3f, 0.9f };    // the eyes jump around the attention this often (short fixations)
+	FVector2D HopSpread = { 1.f, 5.f };        // ... this far from it, a little ahead of its movement
+	float WanderHeadYawShare = 0.5f;           // the head follows this share of the attention sideways
+	float HeadDownShare = 0.35f;               // the head takes this share of a look down (the eyes the rest)
+	float HeadUpShare = 0.7f;                  // ... and of a look up
 	float EyeShiftBase = 0.08f;      // eye movement: seconds + seconds per degree, eased in and out
 	float EyeShiftPerDegree = 0.006f;
-	FVector2D WanderSpeed = { 10.f, 25.f };    // looking around: his attention glides between own points at these deg/s
-	FVector2D WanderDwell = { 0.2f, 1.8f };    // ... and rests this long at each
-	FVector2D EyeHopEvery = { 0.3f, 1.f };     // ... while the eyes hop to it, slightly ahead (EyeLead seconds of the glide)
-	FVector2D EyeLead = { 0.2f, 0.5f };
 	FVector2D JitterEvery = { 0.8f, 2.5f };    // small eye movements while he holds an aversion or a thought
 	FVector2D JitterDegrees = { 0.5f, 2.f };
 	FVector2D GlanceInterval = { 8.f, 20.f };
@@ -144,9 +149,7 @@ private:
 	FVector Offset(const FMRLabGazeInput& In, const FVector& Around, float Yaw, float Pitch) const;
 	void LookAt(const FMRLabGazeInput& In, EKind NewKind, const FVector& Point, bool bTrackVisitor, double Until);
 	void StartSaccade(const FMRLabGazeInput& In, const FVector& To);
-	FVector RandomOwnPoint(const FMRLabGazeInput& In) const;
 	void ChooseOwn(const FMRLabGazeInput& In);
-	FVector WanderPoint(const FVector& Mid, double Time) const;
 
 	bool bStarted = false;
 	bool bWasTracked = false;
@@ -160,12 +163,12 @@ private:
 	double AvertStart = -1e9;
 	double SpeakingEndedAt = -1e9;   // when his last stretch of speaking ended
 	double LastPhraseSeen = -1e9;
-	// Looking around: his attention glides from one own point to the next; head and eyes follow it.
+	// Looking around: the attention (yaw, pitch from straight ahead) eases through two stages towards a moving goal.
 	bool bWander = false;
-	FVector WanderFromDir = FVector::XAxisVector, WanderToDir = FVector::XAxisVector;
-	float WanderFromDist = 300.f, WanderToDist = 300.f;
-	double WanderStart = 0.0;
-	float WanderSeconds = 1.f;
+	float AttnYaw = 0.f, AttnPitch = 0.f, AttnYawVel = 0.f, AttnPitchVel = 0.f;
+	float AttnYawA = 0.f, AttnPitchA = 0.f, AttnYawVelA = 0.f, AttnPitchVelA = 0.f;
+	float GoalYaw = 0.f, GoalPitch = 0.f;
+	double NextGoalAt = 0.0;
 	double NextHop = 0.0;
 	FVector Attention = FVector::ZeroVector;
 	double NextJitter = 0.0;

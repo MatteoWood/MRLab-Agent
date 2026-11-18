@@ -174,6 +174,8 @@ private:
 	TMap<FName, float> PreviewControls;
 	TArray<TPair<FName, float>> OverrideCurves;
 	TArray<TPair<FName, float>> BlinkCurves;
+	FName NoticeCategory;     // shown when the visitor speaks after a pause while he looks around
+	float NoticeValue = 0.f;
 	double GazeCost = 0.0;
 	int32 GazeTicks = 0;
 	float TraceVisitorAngle = -1.f; // degrees between where the eyes look and the visitor point, seen from the eyes

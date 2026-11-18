@@ -29,6 +29,23 @@ namespace
 		return Min + FMath::Max(0.f, Mean - Min) * -FMath::Loge(FMath::Max(FMath::FRand(), 1e-4f));
 	}
 
+	// One step of two critically damped stages in series towards Goal (95 % after Seconds): eased in and out.
+	void Spring2(float& A, float& AVel, float& X, float& XVel, float Goal, float Seconds, float DeltaTime)
+	{
+		const float W = 7.75f / FMath::Max(Seconds, 0.05f);
+		const float Dt = FMath::Min(DeltaTime, 0.25f);
+		auto Stage = [W, Dt](float& Value, float& Vel, float Target)
+		{
+			const float D = Value - Target;
+			const float C = Vel + W * D;
+			const float E = FMath::Exp(-W * Dt);
+			Value = Target + (D + C * Dt) * E;
+			Vel = (Vel - W * C * Dt) * E;
+		};
+		Stage(A, AVel, Goal);
+		Stage(X, XVel, A);
+	}
+
 	float Smooth(float X)
 	{
 		X = FMath::Clamp(X, 0.f, 1.f);
@@ -210,32 +227,21 @@ void FMRLabGaze::Load(const TSharedPtr<FJsonObject>& Object)
 		return;
 	}
 	const TArray<TSharedPtr<FJsonValue>>* List = nullptr;
-	if (Object->TryGetArrayField(TEXT("own_regions"), List))
-	{
-		// [{"min": [f, l, u], "max": [f, l, u], "weight": w}, ...]
-		OwnRegions.Reset();
-		for (const TSharedPtr<FJsonValue>& Value : *List)
-		{
-			const TSharedPtr<FJsonObject> Entry = Value->AsObject();
-			const TArray<TSharedPtr<FJsonValue>>* Lo = nullptr;
-			const TArray<TSharedPtr<FJsonValue>>* Hi = nullptr;
-			if (Entry.IsValid() && Entry->TryGetArrayField(TEXT("min"), Lo) && Entry->TryGetArrayField(TEXT("max"), Hi) && Lo->Num() == 3 && Hi->Num() == 3)
-			{
-				FRegion& Region = OwnRegions.AddDefaulted_GetRef();
-				Region.Min = FVector((*Lo)[0]->AsNumber(), (*Lo)[1]->AsNumber(), (*Lo)[2]->AsNumber());
-				Region.Max = FVector((*Hi)[0]->AsNumber(), (*Hi)[1]->AsNumber(), (*Hi)[2]->AsNumber());
-				Region.Weight = Num(Entry, TEXT("weight"), 1.f);
-			}
-		}
-	}
-	NearDegrees = Num(Object, TEXT("near_degrees"), NearDegrees);
+	WanderYaw = Range(Object, TEXT("wander_yaw"), WanderYaw);
+	WanderPitch = Range(Object, TEXT("wander_pitch"), WanderPitch);
+	WanderStep = Range(Object, TEXT("wander_step"), WanderStep);
+	WanderEvery = Range(Object, TEXT("wander_every"), WanderEvery);
+	WanderSeconds = Num(Object, TEXT("wander_seconds"), WanderSeconds);
+	WanderCenterPull = Num(Object, TEXT("wander_center_pull"), WanderCenterPull);
 	FarChance = Num(Object, TEXT("far_chance"), FarChance);
+	WanderDistance = Num(Object, TEXT("wander_distance"), WanderDistance);
+	HopSpread = Range(Object, TEXT("hop_spread"), HopSpread);
+	WanderHeadYawShare = Num(Object, TEXT("wander_head_yaw_share"), WanderHeadYawShare);
+	HeadDownShare = Num(Object, TEXT("head_down_share"), HeadDownShare);
+	HeadUpShare = Num(Object, TEXT("head_up_share"), HeadUpShare);
 	EyeShiftBase = Num(Object, TEXT("eye_shift_base"), EyeShiftBase);
 	EyeShiftPerDegree = Num(Object, TEXT("eye_shift_per_degree"), EyeShiftPerDegree);
-	WanderSpeed = Range(Object, TEXT("wander_speed"), WanderSpeed);
-	WanderDwell = Range(Object, TEXT("wander_dwell"), WanderDwell);
 	EyeHopEvery = Range(Object, TEXT("eye_hop_every"), EyeHopEvery);
-	EyeLead = Range(Object, TEXT("eye_lead"), EyeLead);
 	JitterEvery = Range(Object, TEXT("jitter_every"), JitterEvery);
 	JitterDegrees = Range(Object, TEXT("jitter_degrees"), JitterDegrees);
 	if (Object->TryGetArrayField(TEXT("fallback_point"), List) && List->Num() == 3)
@@ -378,81 +384,26 @@ void FMRLabGaze::LookAt(const FMRLabGazeInput& In, EKind NewKind, const FVector&
 	}
 }
 
-FVector FMRLabGaze::RandomOwnPoint(const FMRLabGazeInput& In) const
-{
-	float Total = 0.f;
-	for (const FRegion& Region : OwnRegions)
-	{
-		Total += Region.Weight;
-	}
-	float Pick = FMath::FRand() * Total;
-	for (const FRegion& Region : OwnRegions)
-	{
-		Pick -= Region.Weight;
-		if (Pick <= 0.f)
-		{
-			return Local(In, FVector(FMath::FRandRange(Region.Min.X, Region.Max.X), FMath::FRandRange(Region.Min.Y, Region.Max.Y),
-				FMath::FRandRange(Region.Min.Z, Region.Max.Z)));
-		}
-	}
-	return Local(In, FallbackPoint);
-}
-
-FVector FMRLabGaze::WanderPoint(const FVector& Mid, double Time) const
-{
-	const float S = Smooth(WanderSeconds > 0.f ? float((Time - WanderStart) / WanderSeconds) : 1.f);
-	const FVector Dir = FQuat::Slerp(FQuat::Identity, FQuat::FindBetweenNormals(WanderFromDir, WanderToDir), S).RotateVector(WanderFromDir);
-	return Mid + Dir * FMath::Lerp(WanderFromDist, WanderToDist, S);
-}
-
 void FMRLabGaze::ChooseOwn(const FMRLabGazeInput& In)
 {
-	const FVector Mid = (In.EyeL + In.EyeR) * 0.5;
-	const FVector From = bWander ? Attention : GazePoint;
-	// Mostly a point near where his attention is (not the same spot), sometimes anywhere in his room.
-	const FVector Current = (From - Mid).GetSafeNormal();
-	const bool bAnywhere = FMath::FRand() < FarChance;
-	FVector Best = RandomOwnPoint(In);
-	float BestScore = -1.f;
-	for (int32 Try = 0; Try < 16; ++Try)
-	{
-		const FVector Candidate = RandomOwnPoint(In);
-		const float Angle = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(Current, (Candidate - Mid).GetSafeNormal()), -1.f, 1.f)));
-		const float Score = (Angle < 4.f ? 0.05f : (bAnywhere ? 1.f : FMath::Exp(-Angle / FMath::Max(NearDegrees, 1.f)))) * FMath::FRand();
-		if (Score > BestScore)
-		{
-			BestScore = Score;
-			Best = Candidate;
-		}
-	}
-	if (OwnRegions.Num() == 0)
-	{
-		Best = Local(In, FallbackPoint);
-	}
-
-	// Looking around: the attention glides there (eased), the head follows it, the eyes hop along.
-	const bool bWasWandering = bWander;
 	Kind = EKind::Own;
+	Until = Forever;
+	if (bWander)
+	{
+		return; // already looking around: the drift goes on by itself
+	}
+	// Start looking around from where he looks now; the eyes go first, the head follows.
+	const FVector Mid = (In.EyeL + In.EyeR) * 0.5;
+	const FRotator From = (GazePoint - Mid).Rotation();
+	AttnYaw = AttnYawA = GoalYaw = FMath::Clamp(FMath::FindDeltaAngleDegrees(In.FrankForward.Rotation().Yaw, From.Yaw), WanderYaw.X, WanderYaw.Y);
+	AttnPitch = AttnPitchA = GoalPitch = FMath::Clamp(From.Pitch, WanderPitch.X, WanderPitch.Y);
+	AttnYawVel = AttnPitchVel = AttnYawVelA = AttnPitchVelA = 0.f;
+	NextGoalAt = In.Now;
+	NextHop = In.Now;
 	bTrackVisitor = false;
 	bWander = true;
-	Target = Best;
-	WanderFromDir = Current;
-	WanderFromDist = (From - Mid).Size();
-	WanderToDir = (Best - Mid).GetSafeNormal();
-	WanderToDist = (Best - Mid).Size();
-	const float Degrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(WanderFromDir, WanderToDir), -1.f, 1.f)));
-	WanderStart = In.Now;
-	WanderSeconds = FMath::Max(0.4f, Degrees / FMath::Max(Rand(WanderSpeed), 1.f));
-	Until = In.Now + WanderSeconds + Rand(WanderDwell);
-	Attention = From;
 	HeadMoveAt = -1.0;
 	bHeadFollowsVisitor = false;
-	if (!bWasWandering)
-	{
-		NextHop = In.Now; // from the visitor or an aversion: the eyes go first
-		LastShiftDegrees = Degrees;
-		LastShiftAt = In.Now;
-	}
 }
 
 void FMRLabGaze::Update(const FMRLabGazeInput& In)
@@ -719,14 +670,40 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 	}
 	else if (bWander)
 	{
-		// Looking around: the head follows the gliding attention; the eyes hop to it, a little ahead, and hold.
-		Attention = WanderPoint(Mid, Now);
+		// Looking around: the attention drifts on a smooth random path towards goals that change before they are reached
+		// (no resting points); the eyes jump around it in short fixations, a little ahead; the head follows part of it.
+		if (Now >= NextGoalAt)
+		{
+			NextGoalAt = Now + Rand(WanderEvery);
+			if (FMath::FRand() < FarChance)
+			{
+				GoalYaw = Rand(WanderYaw);
+				GoalPitch = Rand(WanderPitch);
+			}
+			else
+			{
+				const float Step = Rand(WanderStep);
+				const float Angle = FMath::FRandRange(0.f, 2.f * PI);
+				GoalYaw = GoalYaw * (1.f - WanderCenterPull) + Step * FMath::Cos(Angle);
+				GoalPitch = GoalPitch * (1.f - WanderCenterPull) + Step * 0.6f * FMath::Sin(Angle);
+			}
+			GoalYaw = FMath::Clamp(GoalYaw, WanderYaw.X, WanderYaw.Y);
+			GoalPitch = FMath::Clamp(GoalPitch, WanderPitch.X, WanderPitch.Y);
+		}
+		Spring2(AttnYawA, AttnYawVelA, AttnYaw, AttnYawVel, GoalYaw, WanderSeconds, In.DeltaTime);
+		Spring2(AttnPitchA, AttnPitchVelA, AttnPitch, AttnPitchVel, GoalPitch, WanderSeconds, In.DeltaTime);
+		const float ForwardYaw = In.FrankForward.Rotation().Yaw;
+		Attention = Mid + FRotator(AttnPitch, ForwardYaw + AttnYaw, 0.f).Vector() * WanderDistance;
 		HeadAnchor = Attention;
 		if (Now >= NextHop && Now - SaccadeStart > SaccadeSeconds)
 		{
 			NextHop = Now + Rand(EyeHopEvery);
-			const FVector Ahead = WanderPoint(Mid, FMath::Min(Now + Rand(EyeLead), WanderStart + WanderSeconds));
-			StartSaccade(In, Offset(In, Ahead, FMath::FRandRange(-1.5f, 1.5f), FMath::FRandRange(-1.5f, 1.5f)));
+			const float Lead = FMath::FRandRange(0.2f, 0.5f);
+			const float Spread = Rand(HopSpread);
+			const float Angle = FMath::FRandRange(0.f, 2.f * PI);
+			const FRotator Look(AttnPitch + AttnPitchVel * Lead + 0.6f * Spread * FMath::Sin(Angle),
+				ForwardYaw + AttnYaw + AttnYawVel * Lead + Spread * FMath::Cos(Angle), 0.f);
+			StartSaccade(In, Mid + Look.Vector() * WanderDistance);
 		}
 	}
 	else if (Now >= NextJitter && Now - SaccadeStart > SaccadeSeconds)
@@ -776,8 +753,13 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 	}
 	// Two critically damped stages in series on the head target's direction seen from the eyes: a bell-shaped speed
 	// (peak about 0.4 x HeadSeconds after the start), no overshoot, smooth also when the visitor moves.
+	// The head takes only part of a look down or up and, while he looks around, of the sideways drift; the eyes do the rest.
 	const FVector ToAnchor = HeadAnchor - Mid;
-	const FRotator Goal = ToAnchor.Rotation();
+	const FRotator Toward = ToAnchor.Rotation();
+	const float FrankYaw = In.FrankForward.Rotation().Yaw;
+	FRotator Goal;
+	Goal.Yaw = FrankYaw + FMath::FindDeltaAngleDegrees(FrankYaw, Toward.Yaw) * (bWander ? WanderHeadYawShare : 1.f);
+	Goal.Pitch = Toward.Pitch * (Toward.Pitch < 0.f ? HeadDownShare : HeadUpShare);
 	if (!bHeadInit)
 	{
 		bHeadInit = true;

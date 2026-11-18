@@ -74,6 +74,10 @@
       "CTRL_expressions_mouthPressUL": 0.4, "CTRL_expressions_mouthPressUR": 0.4,
       "CTRL_expressions_mouthPressDL": 0.4, "CTRL_expressions_mouthPressDR": 0.4,
       "CTRL_expressions_noseWrinkleL": 0.15, "CTRL_expressions_noseWrinkleR": 0.15 } },
+    "noticing": { "hold": 0.6, "gain": 1.0, "valence": 0, "flash": 0.2, "recipe": {
+      "CTRL_expressions_browRaiseInL": 0.55, "CTRL_expressions_browRaiseInR": 0.55,
+      "CTRL_expressions_browRaiseOuterL": 0.5, "CTRL_expressions_browRaiseOuterR": 0.5,
+      "CTRL_expressions_eyeWidenL": 0.15, "CTRL_expressions_eyeWidenR": 0.15 } },
     "knowing": { "hold": 3.0, "gain": 0.8, "valence": 0, "recipe": {
       "CTRL_expressions_browRaiseOuterL": 0.45, "CTRL_expressions_mouthCornerPullL": 0.45,
       "CTRL_expressions_eyeSquintInnerL": 0.15 } }
@@ -91,6 +95,7 @@
     "surprised": { "mood": 5, "intensity": 0.5, "valence": 0 },
     "serious": { "mood": 2, "intensity": 0.3, "valence": -0.3 }
   },
+  "notice": { "_about": "When the visitor speaks after a pause (or no conversation) while Frank looks around: a small brow raise as he looks back (owner, D107).", "category": "noticing", "value": 0.6 },
   "turns": {
     "_about": "Who speaks, for gaze and blinks (README 4.10). Frank's voice from the lip sync's mouth weight; the visitor from the loudness of the audio sent (microphone or test input), counted only after Frank has been silent echo_guard_seconds (no echo cancellation, Q24). Frank's turn ends after frank_end_quick of silence once the words Decisions marked turn_final were heard, else after frank_end_seconds: pauses inside his answers reach 1.7 s (replay, 2026-11-17).",
     "frank_voice_weight": 0.3, "visitor_threshold": 0.02, "echo_guard_seconds": 0.4, "min_visitor_speech": 0.15,
@@ -98,18 +103,11 @@
     "phrase_pause_seconds": 0.35, "yield_max_seconds": 5.0, "conversation_seconds": 15.0
   },
   "gaze": {
-    "_about": "Where Frank looks (README 4.10, D90, D104, D105). Own business: his attention glides (wander_speed deg/s, eased) between random points in own_regions (boxes of (forward, left, up) in cm from his feet, within reach of eyes plus head, at most about 40 deg to the side), usually within near_degrees of where it is, resting wander_dwell s at each; the head follows it all the time, the eyes hop to it slightly ahead (eye_hop_every, eye_lead). Eye movements take eye_shift_base + eye_shift_per_degree seconds, eased in and out; the head eases in and out and is 95 % there after head_seconds. eye_degrees: measured eye rotation per eye look curve at 0.25, 0.5, 0.75, 1.0 (+ right / up), and each eye's rest direction, in the head bone's frame.",
-    "own_regions": [
-      { "min": [400, -250, 120], "max": [700, 250, 220], "weight": 3.0, "_about": "out through the wall opening" },
-      { "min": [180, -100, 0], "max": [400, 100, 5], "weight": 1.5, "_about": "floor ahead" },
-      { "min": [250, 120, 80], "max": [400, 200, 220], "weight": 1.0, "_about": "his room, left" },
-      { "min": [250, -200, 80], "max": [400, -120, 220], "weight": 1.0, "_about": "his room, right" },
-      { "min": [250, -120, 270], "max": [450, 120, 300], "weight": 0.5, "_about": "ceiling lights" },
-      { "min": [60, -20, 85], "max": [90, 20, 100], "weight": 0.2, "_about": "his hands" }
-    ],
-    "near_degrees": 20, "far_chance": 0.2,
+    "_about": "Where Frank looks (README 4.10, D90, D104 to D107). Looking around: his attention drifts on a smooth random path (wander_*: degrees from straight ahead, a new goal every wander_every s, wander_step from the last, eased over wander_seconds, never resting), the eyes jump around it (eye_hop_every, hop_spread, a little ahead), the head follows wander_head_yaw_share of it sideways; the head takes head_down_share of any look down and head_up_share of a look up, the eyes the rest; eye movements take eye_shift_base + eye_shift_per_degree seconds, eased in and out; the head starts head_delay s after the eyes and is 95 % there after head_seconds. eye_degrees: measured eye rotation per eye look curve at 0.25, 0.5, 0.75, 1.0 (+ right / up), and each eye's rest direction, in the head bone's frame.",
+    "wander_yaw": [-35, 35], "wander_pitch": [-18, 12], "wander_step": [6, 18], "wander_every": [1.5, 4.0], "wander_seconds": 2.5,
+    "wander_center_pull": 0.2, "far_chance": 0.15, "wander_distance": 400, "eye_hop_every": [0.3, 0.9], "hop_spread": [1, 5],
+    "wander_head_yaw_share": 0.5, "head_down_share": 0.35, "head_up_share": 0.7,
     "eye_shift_base": 0.12, "eye_shift_per_degree": 0.008,
-    "wander_speed": [6, 15], "wander_dwell": [0.2, 1.8], "eye_hop_every": [0.4, 1.2], "eye_lead": [0.2, 0.5],
     "jitter_every": [0.8, 2.5], "jitter_degrees": [0.5, 2.0],
     "fallback_point": [300, 0, 172],
     "glance_interval": [8, 20], "glance_length": [0.5, 2], "notice_delay": [0.2, 0.5],
@@ -118,7 +116,7 @@
     "aversion_degrees": [8, 15], "phrase_start_avert": 0.5, "phrase_avert_length": [1, 2], "min_aversion": 1.0, "continue_seconds": 1.5,
     "think_delay": 0.6, "think_after_voice": [0.3, 1.3], "yield_hold": [3, 5],
     "pause_glance_every": [3, 6], "pause_glance_length": [0.5, 1.5], "scan_every": [0.5, 2],
-    "head_join_degrees": 20, "head_delay": 0.05, "head_seconds": 1.4,
+    "head_join_degrees": 20, "head_delay": 0.12, "head_seconds": 1.4,
     "eye_degrees": {
       "_about": "Measured 2026-11-17 (Simulate, PreviewFaceControl, FACIAL_L_Eye / FACIAL_R_Eye local Z against the head bone): linear, each curve moves only its own eye; eyeParallelLookDirection changes nothing.",
       "L": { "neutral": [0, 0], "right": [9.39, 18.78, 28.17, 37.56], "left": [-10.57, -21.13, -31.70, -42.26], "up": [7.42, 14.84, 22.26, 29.68], "down": [-9.97, -19.93, -29.90, -39.87] },

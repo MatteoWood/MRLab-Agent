@@ -223,6 +223,15 @@ bool UMRLabBehaviorComponent::LoadSettings()
 		}
 	}
 
+	if (Root->TryGetObjectField(TEXT("notice"), Object))
+	{
+		FString Category;
+		if ((*Object)->TryGetStringField(TEXT("category"), Category))
+		{
+			NoticeCategory = FName(Category);
+		}
+		NoticeValue = NumberOr(*Object, TEXT("value"), NoticeValue);
+	}
 	if (Root->TryGetObjectField(TEXT("turns"), Object))
 	{
 		Turns.Load(*Object);
@@ -237,8 +246,8 @@ bool UMRLabBehaviorComponent::LoadSettings()
 	}
 
 	bLoaded = true;
-	UE_LOG(LogMRLabBehavior, Log, TEXT("Behaviour: %d expression categories, %d baseline controls, strength %.2f, explicit moods %s, %d own gaze regions (%s)"),
-		Categories.Num(), Baseline.Num(), Strength, bExplicitMoods ? TEXT("on") : TEXT("off"), Gaze.OwnRegions.Num(), *Path);
+	UE_LOG(LogMRLabBehavior, Log, TEXT("Behaviour: %d expression categories, %d baseline controls, strength %.2f, explicit moods %s (%s)"),
+		Categories.Num(), Baseline.Num(), Strength, bExplicitMoods ? TEXT("on") : TEXT("off"), *Path);
 	return true;
 }
 
@@ -670,7 +679,19 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 		FindParts();
 	}
 	const UMRLabLiveSession* Live = Session.Get();
+	const EMRLabTurn Before = Turns.State;
+	const bool bWasLookingAround = Gaze.Kind == FMRLabGaze::EKind::Own;
 	Turns.Update(Now, Speaking, Live ? Live->VisitorLevel : 0.f, TurnDoneAt, TurnFinalAt);
+	// After a real silence (a pause or no conversation) while he looked around, the visitor's voice makes him look back
+	// with a small raise of the brows.
+	if (Turns.State == EMRLabTurn::Listening && (Before == EMRLabTurn::Pause || Before == EMRLabTurn::Outside) && bWasLookingAround)
+	{
+		if (FCategory* Category = FindCategory(NoticeCategory))
+		{
+			Apply(*Category, NoticeValue);
+			UE_LOG(LogMRLabBehavior, Log, TEXT("Noticed the visitor after a silence: %s %.2f"), *NoticeCategory.ToString(), NoticeValue);
+		}
+	}
 	if (Turns.State != LoggedTurn)
 	{
 		UE_LOG(LogMRLabBehavior, Log, TEXT("Turn: %s -> %s"), MRLabTurnName(LoggedTurn), MRLabTurnName(Turns.State));
