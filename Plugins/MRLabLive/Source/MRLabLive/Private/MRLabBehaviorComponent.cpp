@@ -247,7 +247,10 @@ bool UMRLabBehaviorComponent::LoadSettings()
 		ListenValue = NumberOr(*Object, TEXT("then_value"), ListenValue);
 		ListenAfter = NumberOr(*Object, TEXT("then_after"), ListenAfter);
 		InterruptInto = NumberOr(*Object, TEXT("into"), InterruptInto);
-		NewUtteranceGap = NumberOr(*Object, TEXT("new_utterance_gap"), NewUtteranceGap);
+		InterruptLevel = NumberOr(*Object, TEXT("level"), InterruptLevel);
+		InterruptMinSpeech = NumberOr(*Object, TEXT("min_speech"), InterruptMinSpeech);
+		InterruptQuietGap = NumberOr(*Object, TEXT("quiet_gap"), InterruptQuietGap);
+		FinishedWithin = NumberOr(*Object, TEXT("finished_within"), FinishedWithin);
 		InterruptCooldown = NumberOr(*Object, TEXT("cooldown"), InterruptCooldown);
 		InterruptLookSeconds = NumberOr(*Object, TEXT("look_seconds"), InterruptLookSeconds);
 		HeadBackDegrees = NumberOr(*Object, TEXT("head_back_degrees"), HeadBackDegrees);
@@ -458,8 +461,13 @@ void UMRLabBehaviorComponent::HandleFrank(const FMRLabDecision& Decision)
 	const FMRLabAnswer* Final = Decision.Find(TEXT("turn_final"));
 	const bool bTurnFinal = Final && Final->Value >= 0.6f;
 	// The newest of his words (their text runs ahead of his voice; when he stops, these are the last ones heard).
-	const FString Words = Decision.Text.TrimEnd();
-	bLastFrankFinished = bTurnFinal && (Words.EndsWith(TEXT(".")) || Words.EndsWith(TEXT("!")) || Words.EndsWith(TEXT("?")));
+	// Decisions can arrive out of order: one on older words does not count.
+	if (Decision.StartMs < 0 || Decision.StartMs >= LastFrankDecisionMs)
+	{
+		LastFrankDecisionMs = Decision.StartMs;
+		const FString Words = Decision.Text.TrimEnd();
+		bLastFrankFinished = bTurnFinal && (Words.EndsWith(TEXT(".")) || Words.EndsWith(TEXT("!")) || Words.EndsWith(TEXT("?")));
+	}
 	if (!Delivery || Delivery->Probability(Delivery->Choice) < MinProbability || Delivery->Confidence < MinConfidence)
 	{
 		if (bTurnFinal)
@@ -715,27 +723,46 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 			UE_LOG(LogMRLabBehavior, Log, TEXT("Noticed the visitor after a silence: %s %.2f"), *NoticeCategory.ToString(), NoticeValue);
 		}
 	}
-	// Interrupted (D110, D112). The Live API gives no signal: the model stops by itself, at the end of a word, about
-	// 1.2 to 2 s after the visitor starts. So he reacts as soon as the visitor's first words arrive (a new utterance in
-	// their transcript) while his voice is heard and his newest words (their text runs ahead of his voice) do not end
-	// his turn: a short surprise with the head tilting back a little, then his listening face. The transcript, not
-	// the microphone level, tells that the visitor speaks over him: the microphone also hears Frank (Q24).
-	const double VisitorFragment = Live ? Live->LastVisitorFragmentTime() : 0.0;
-	if (VisitorFragment > SeenVisitorFragment)
+	// Interrupted (D110, D112, D113). The Live API gives no signal (the model stops by itself 1.2 to 2 s after the
+	// visitor starts). The visitor wears a clip-on microphone: above InterruptLevel the sound is the visitor, below it
+	// Frank's own voice from the speakers or nothing. A loud stretch that started while he speaks and lasted
+	// InterruptMinSpeech s: his voice stops at the end of the word being heard, a short surprise with the head tilting
+	// back a little, then his listening face. Not when he is nearly done (his newest words end his turn and are heard
+	// within FinishedWithin s): then he finishes.
+	const float Level = Live ? Live->VisitorLevel : 0.f;
+	if (Level >= InterruptLevel)
 	{
-		if (VisitorFragment - SeenVisitorFragment > NewUtteranceGap && Turns.bFrankVoice && Now - Turns.FrankTurnStart >= InterruptInto
-			&& !bLastFrankFinished && Now - LastInterruptAt > InterruptCooldown)
+		LoudSince = LoudSince < 0.0 ? Now : LoudSince;
+		LastLoud = Now;
+	}
+	else if (LoudSince >= 0.0 && Now - LastLoud > InterruptQuietGap)
+	{
+		LoudSince = -1.0;
+	}
+	if (LoudSince >= 0.0 && LoudSince != HandledOnset && Now - LoudSince >= InterruptMinSpeech)
+	{
+		HandledOnset = LoudSince;
+		if (Live && Turns.bFrankVoice && LoudSince - Turns.FrankTurnStart >= InterruptInto && Now - LastInterruptAt > InterruptCooldown)
 		{
-			LastInterruptAt = Now;
-			if (FCategory* Category = FindCategory(InterruptCategory))
+			const float Left = Live->FrankWordsLeft();
+			if (bLastFrankFinished && Left < FinishedWithin)
 			{
-				Apply(*Category, InterruptValue);
+				UE_LOG(LogMRLabBehavior, Log, TEXT("The visitor speaks as he finishes (%.1f s left): he finishes"), Left);
 			}
-			Gaze.Interrupted(Now, HeadBackDegrees, InterruptLookSeconds);
-			ListenAt = Now + ListenAfter;
-			UE_LOG(LogMRLabBehavior, Log, TEXT("Interrupted: the visitor speaks over him"));
+			else
+			{
+				LastInterruptAt = Now;
+				Session.Get()->StopAtWordEnd(); // Live is the same session, read-only here
+				if (FCategory* Category = FindCategory(InterruptCategory))
+				{
+					Apply(*Category, InterruptValue);
+				}
+				Gaze.Interrupted(Now, HeadBackDegrees, InterruptLookSeconds);
+				ListenAt = Now + ListenAfter;
+				UE_LOG(LogMRLabBehavior, Log, TEXT("Interrupted: the visitor speaks over him (level %.3f, %.2f s after they started, %.1f s of his words left)"),
+					Level, Now - LoudSince, Left);
+			}
 		}
-		SeenVisitorFragment = VisitorFragment;
 	}
 	if (ListenAt > 0.0 && Now >= ListenAt)
 	{

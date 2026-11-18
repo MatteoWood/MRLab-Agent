@@ -175,20 +175,27 @@ private:
 	TArray<TPair<FName, float>> OverrideCurves;
 	TArray<TPair<FName, float>> BlinkCurves;
 	FName NoticeCategory;     // shown when the visitor speaks after a pause while he looks around
-	// Interrupted: the visitor starts speaking while Frank's voice is heard (a new utterance, at least InterruptInto s
-	// into his turn) and his newest words do not end his turn.
+	// Interrupted (D113): the visitor's clip-on microphone is louder than InterruptLevel for InterruptMinSpeech s
+	// (dips shorter than InterruptQuietGap belong to it), starting while Frank speaks, at least InterruptInto s into
+	// his turn; unless he is nearly done (his newest words end his turn and are heard within FinishedWithin s).
 	FName InterruptCategory;
 	float InterruptValue = 0.f;
 	FName ListenCategory;     // ... then this face after ListenAfter seconds
 	float ListenValue = 0.f;
 	float ListenAfter = 0.6f;
 	float HeadBackDegrees = 6.f;
-	float InterruptInto = 1.f;      // visitor words earlier in his turn are late transcripts of their previous turn
-	float NewUtteranceGap = 1.5f;   // a visitor fragment after this long without one starts a new utterance
+	float InterruptInto = 0.3f;
+	float InterruptLevel = 0.05f;
+	float InterruptMinSpeech = 0.1f;
+	float InterruptQuietGap = 0.3f;
+	float FinishedWithin = 1.5f;
+	double LoudSince = -1.0;        // start of the visitor's current loud stretch, -1 when quiet
+	double LastLoud = -1e9;
+	double HandledOnset = -1.0;     // the loud stretch already judged
 	float InterruptCooldown = 5.f;
 	float InterruptLookSeconds = 2.5f; // eyes on the visitor this long, no aversions
-	double SeenVisitorFragment = 0.0;
 	bool bLastFrankFinished = true; // his latest words: turn_final and a sentence end
+	int32 LastFrankDecisionMs = -1; // start_ms of the words bLastFrankFinished is about
 	double LastInterruptAt = -1e9;
 	double ListenAt = -1.0;
 	float NoticeValue = 0.f;

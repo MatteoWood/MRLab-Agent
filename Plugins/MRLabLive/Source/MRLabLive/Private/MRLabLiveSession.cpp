@@ -47,6 +47,12 @@ namespace
 	constexpr int32 CatchUpLevelSamples = LiveSampleRate * 2 / 10;
 	constexpr int32 SilenceFrame = LiveSampleRate / 100; // 10 ms
 	constexpr int32 SilenceKeptFrames = 10; // the first 100 ms of a silence never change
+	// Stopping at a word end (D113): a word ends at 30 ms of quiet (below 0.2 of the loudest 10 ms since the cut, at
+	// least below RMS 0.006); he says at most 0.5 s more. If the model talks on 4 s after the cut, he plays on from
+	// its next word end.
+	constexpr int32 WordEndQuietFrames = 3;
+	constexpr int32 FinishMaxSamples = LiveSampleRate / 2;
+	constexpr double DropMaxSeconds = 4.0;
 	// Mouth closing in silence: the Live API sends exact zeros between answers. A 20 ms step counts as voice above
 	// this RMS level; the mouth controls fade in within about 60 ms before speech and out over about 200 ms after it.
 	constexpr float VoiceRms = 0.003f;
@@ -678,12 +684,18 @@ void UMRLabLiveSession::HandleMessage(const FString& Message)
 		{
 			const double Now = FPlatformTime::Seconds();
 			if (AgentAnchorMs < 0 || bLastSpeakerUser
-				|| (Now - LastAgentFragment > 2.0 && VoiceWave && VoiceWave->GetAvailableAudioByteCount() == 0))
+				|| (Now - LastAgentFragment > 2.0 && VoiceWave && VoiceWave->Waiting() == 0))
 			{
 				AgentAnchorMs = StartMs;
 				AgentAnchorSample = -1;
 			}
+			if (bLastSpeakerUser && VoiceCut != EVoiceCut::None)
+			{
+				VoiceCut = EVoiceCut::None; // his answer to the visitor's words: it plays
+				UE_LOG(LogMRLabLive, Log, TEXT("Voice plays again: a new answer, %.2f s after the cut"), Now - CutAt);
+			}
 			LastAgentFragment = Now;
+			LastAgentEndMs = EndMs >= 0 ? EndMs : LastAgentEndMs;
 		}
 	}
 	if (Type == TEXT("session.output_audio.delta"))
@@ -895,12 +907,65 @@ void UMRLabLiveSession::ReleaseVoice()
 	{
 		return;
 	}
+	if (VoiceCut == EVoiceCut::Dropping)
+	{
+		// The rest of the interrupted answer is left out. If the model still talks DropMaxSeconds after the cut (the
+		// visitor's sound did not stop it), he plays on from its next word end.
+		int32 From = PendingVoice.Num();
+		if (FPlatformTime::Seconds() - CutAt > DropMaxSeconds)
+		{
+			for (int32 Frame = 0; Frame + SilenceFrame <= PendingVoice.Num(); Frame += SilenceFrame)
+			{
+				if (WordEnds(PendingVoice.GetData() + Frame, SilenceFrame))
+				{
+					From = Frame + SilenceFrame;
+					VoiceCut = EVoiceCut::None;
+					UE_LOG(LogMRLabLive, Log, TEXT("Voice plays again, %.1f s after the cut"), DropMaxSeconds);
+					break;
+				}
+			}
+		}
+		PendingVoice.RemoveAt(0, From);
+		if (PendingVoice.Num() == 0)
+		{
+			return;
+		}
+	}
+	if (VoiceCut == EVoiceCut::Finishing)
+	{
+		// Play on to the end of the word, then leave out the rest.
+		int32 Keep = 0;
+		bool bEnded = false;
+		while (Keep + SilenceFrame <= PendingVoice.Num() && !bEnded)
+		{
+			bEnded = WordEnds(PendingVoice.GetData() + Keep, SilenceFrame) || FinishLeft <= SilenceFrame;
+			Keep += SilenceFrame;
+			FinishLeft -= SilenceFrame;
+		}
+		if (!bEnded)
+		{
+			Keep = PendingVoice.Num();
+		}
+		else
+		{
+			for (int32 Index = 0; Index < SilenceFrame; ++Index)
+			{
+				int16& Sample = PendingVoice[Keep - SilenceFrame + Index];
+				Sample = int16(Sample * (1.f - float(Index + 1) / SilenceFrame));
+			}
+			VoiceCut = EVoiceCut::Dropping;
+			UE_LOG(LogMRLabLive, Log, TEXT("Voice stopped at a word end, %.2f s after the cut"), FPlatformTime::Seconds() - CutAt);
+		}
+		EnqueueVoice(PendingVoice.GetData(), Keep);
+		PendingVoice.Reset();
+		return;
+	}
 	// Catching up (D111, D112). The stream runs in real time: audio that piles up during a stall or a hitch (it comes
 	// as a burst afterwards) would keep him late for the rest of the session. When more than CatchUpHighSamples would
 	// wait in the wave, the stream's exact silence (zeros, in 10 ms frames, after the first 100 ms of a silence, so
 	// the short zero runs inside speech never change) is dropped down to CatchUpLevelSamples. Nothing else waits.
 	const int32 Count = PendingVoice.Num();
-	const int32 Queued = VoiceWave->GetAvailableAudioByteCount() / sizeof(int16);
+	const int32 Queued = VoiceWave->Waiting();
 	int32 Drop = Queued + Count > CatchUpHighSamples ? Queued + Count - CatchUpLevelSamples : 0;
 	const bool bDropping = Drop > 0;
 	TArray<int16> Kept;
@@ -943,7 +1008,7 @@ void UMRLabLiveSession::ReleaseVoice()
 void UMRLabLiveSession::EnqueueVoice(const int16* Samples, int32 NumSamples)
 {
 	TArray<int16> Pcm;
-	const bool bDry = VoiceWave->GetAvailableAudioByteCount() == 0;
+	const bool bDry = VoiceWave->Waiting() == 0;
 	if (bDry)
 	{
 		// Start of the stream, or the voice ran dry: hold it back again by the lip sync delay.
@@ -954,7 +1019,7 @@ void UMRLabLiveSession::EnqueueVoice(const int16* Samples, int32 NumSamples)
 		AgentAnchorSample += VoiceDelaySamples; // the start of his utterance is still to come: the delay goes in front
 	}
 	Pcm.Append(Samples, NumSamples);
-	VoiceWave->QueueAudio(reinterpret_cast<const uint8*>(Pcm.GetData()), Pcm.Num() * sizeof(int16));
+	VoiceWave->Add(Pcm.GetData(), Pcm.Num());
 	VoiceQueued += Pcm.Num();
 
 	if (LipSync.IsValid())
@@ -976,8 +1041,9 @@ void UMRLabLiveSession::UpdateLipSync()
 		return;
 	}
 	// The voice sample being played now: everything queued minus what is still waiting in the wave.
-	const bool bDry = VoiceWave->GetAvailableAudioByteCount() == 0;
-	Playhead = VoiceQueued - VoiceWave->GetAvailableAudioByteCount() / sizeof(int16);
+	const int32 Waiting = VoiceWave->Waiting();
+	const bool bDry = Waiting == 0;
+	Playhead = VoiceQueued - Waiting;
 	LipSync->Playhead = Playhead;
 
 	FScopeLock ScopeLock(&LipSync->Lock);
@@ -1004,7 +1070,9 @@ void UMRLabLiveSession::UpdateLipSync()
 	const double Now = FPlatformTime::Seconds();
 	const float Dt = LastLipSyncTime > 0.0 ? float(FMath::Min(Now - LastLipSyncTime, 0.25)) : 0.f;
 	LastLipSyncTime = Now;
-	DryFade = (!B && bDry) ? FMath::Max(0.f, DryFade - Dt / 0.25f) : 1.f;
+	// Silenced after a word end (D113): the same, from the end of the word.
+	const bool bMuted = Playhead >= MuteFrom && Playhead < MuteTo;
+	DryFade = ((!B && bDry) || bMuted) ? FMath::Max(0.f, DryFade - Dt / 0.25f) : 1.f;
 	if (DryFade < 1.f)
 	{
 		const float Keep = FMath::SmoothStep(0.f, 1.f, DryFade);
@@ -1013,7 +1081,8 @@ void UMRLabLiveSession::UpdateLipSync()
 			Control.Value *= Keep;
 		}
 	}
-	SpeakingWeight = B ? FMath::Lerp(A.Value.Last(), B->Value.Last(), Alpha) : (bDry ? FMath::Max(0.f, SpeakingWeight - 0.1f) : A.Value.Last());
+	SpeakingWeight = bMuted ? FMath::Max(0.f, SpeakingWeight - 0.1f)
+		: B ? FMath::Lerp(A.Value.Last(), B->Value.Last(), Alpha) : (bDry ? FMath::Max(0.f, SpeakingWeight - 0.1f) : A.Value.Last());
 	Frames.RemoveAt(0, Next - 1);
 }
 
@@ -1024,6 +1093,110 @@ int64 UMRLabLiveSession::AgentFragmentSample(int32 StartMs) const
 		return -1;
 	}
 	return AgentAnchorSample + int64(StartMs - AgentAnchorMs) * LiveSampleRate / 1000;
+}
+
+float UMRLabLiveSession::FrankWordsLeft() const
+{
+	const int64 End = AgentFragmentSample(LastAgentEndMs);
+	return End < 0 ? -1.f : float(End - Playhead) / LiveSampleRate;
+}
+
+bool UMRLabLiveSession::WordEnds(const int16* Frame, int32 Num)
+{
+	double Sum = 0.0;
+	for (int32 Index = 0; Index < Num; ++Index)
+	{
+		const double Value = Frame[Index] / 32768.0;
+		Sum += Value * Value;
+	}
+	const float Rms = float(FMath::Sqrt(Sum / FMath::Max(1, Num)));
+	CutPeak = FMath::Max(CutPeak, Rms);
+	CutQuietFrames = Rms < FMath::Max(0.006f, 0.2f * CutPeak) ? CutQuietFrames + 1 : 0;
+	return CutQuietFrames >= WordEndQuietFrames;
+}
+
+void UMRLabLiveSession::StopAtWordEnd()
+{
+	if (!VoiceWave || VoiceCut != EVoiceCut::None)
+	{
+		return;
+	}
+	ReleaseVoice(); // what arrived this tick goes into the wave first
+	CutAt = FPlatformTime::Seconds();
+	CutPeak = 0.f;
+	CutQuietFrames = 0;
+	// The word may end in what waits in the wave: everything after its end there becomes silence.
+	TArray<int16> Waiting;
+	VoiceWave->CopyWaiting(Waiting);
+	for (int32 Frame = 0; Frame + SilenceFrame <= Waiting.Num(); Frame += SilenceFrame)
+	{
+		if (WordEnds(Waiting.GetData() + Frame, SilenceFrame))
+		{
+			const int32 Keep = Frame + SilenceFrame;
+			VoiceWave->SilenceFrom(Keep, SilenceFrame);
+			MuteFrom = VoiceQueued - Waiting.Num() + Keep;
+			MuteTo = VoiceQueued;
+			VoiceCut = EVoiceCut::Dropping;
+			UE_LOG(LogMRLabLive, Log, TEXT("Voice stopped at a word end, %.2f s after the cut"), Keep / float(LiveSampleRate));
+			return;
+		}
+	}
+	// Otherwise it ends in the audio still to come.
+	VoiceCut = EVoiceCut::Finishing;
+	FinishLeft = FinishMaxSamples;
+}
+
+void UMRLabVoiceWave::Add(const int16* Samples, int32 Num)
+{
+	FScopeLock ScopeLock(&Lock);
+	if (Read > LiveSampleRate)
+	{
+		Buffer.RemoveAt(0, Read, EAllowShrinking::No);
+		Read = 0;
+	}
+	Buffer.Append(Samples, Num);
+}
+
+int32 UMRLabVoiceWave::Waiting() const
+{
+	FScopeLock ScopeLock(&Lock);
+	return Buffer.Num() - Read;
+}
+
+void UMRLabVoiceWave::CopyWaiting(TArray<int16>& Out) const
+{
+	FScopeLock ScopeLock(&Lock);
+	Out = TArray<int16>(Buffer.GetData() + Read, Buffer.Num() - Read);
+}
+
+void UMRLabVoiceWave::SilenceFrom(int32 Offset, int32 Fade)
+{
+	FScopeLock ScopeLock(&Lock);
+	const int32 Start = Read + FMath::Max(0, Offset - Fade);
+	const int32 End = FMath::Min(Read + Offset, Buffer.Num());
+	for (int32 Index = Start; Index < End; ++Index)
+	{
+		Buffer[Index] = int16(Buffer[Index] * (1.f - float(Index - Start + 1) / FMath::Max(1, End - Start)));
+	}
+	for (int32 Index = FMath::Max(End, Read); Index < Buffer.Num(); ++Index)
+	{
+		Buffer[Index] = 0;
+	}
+}
+
+int32 UMRLabVoiceWave::OnGeneratePCMAudio(TArray<uint8>& OutAudio, int32 NumSamples)
+{
+	// Called on the audio render thread: what waits, then silence (as the engine does when a procedural wave runs dry).
+	OutAudio.Reset();
+	OutAudio.AddZeroed(NumSamples * sizeof(int16));
+	FScopeLock ScopeLock(&Lock);
+	const int32 Count = FMath::Min(NumSamples, Buffer.Num() - Read);
+	if (Count > 0)
+	{
+		FMemory::Memcpy(OutAudio.GetData(), Buffer.GetData() + Read, Count * sizeof(int16));
+		Read += Count;
+	}
+	return NumSamples;
 }
 
 void UMRLabLiveSession::AddTranscript(bool bUser, const FString& Delta)
@@ -1277,7 +1450,7 @@ void UMRLabLiveSession::StartReplay()
 
 void UMRLabLiveSession::StartVoice()
 {
-	VoiceWave = NewObject<USoundWaveProcedural>(this);
+	VoiceWave = NewObject<UMRLabVoiceWave>(this);
 	VoiceWave->SetSampleRate(LiveSampleRate);
 	VoiceWave->NumChannels = 1;
 	VoiceWave->Duration = INDEFINITELY_LOOPING_DURATION;
@@ -1414,6 +1587,9 @@ void UMRLabLiveSession::Shutdown(const FString& Reason)
 	VisitorLevel = 0.f;
 	PendingVoice.Reset();
 	DroppedSilence = 0;
+	LastAgentEndMs = -1;
+	VoiceCut = EVoiceCut::None;
+	MuteFrom = MuteTo = 0;
 	SilentFrames = 0;
 	bTestInput = false;
 	TestPcm.Reset();

@@ -4,6 +4,7 @@
 #include "AudioResampler.h"
 #include "Components/ActorComponent.h"
 #include "Generators/AudioGenerator.h"
+#include "Sound/SoundWaveProcedural.h"
 #include "MRLabLiveSession.generated.h"
 
 class FLiveSocket;
@@ -11,7 +12,6 @@ struct FLipSync;
 class FJsonObject;
 class UAudioCapture;
 class UAudioComponent;
-class USoundWaveProcedural;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FMRLabLiveText, const FString&, Text);
 
@@ -55,6 +55,32 @@ struct FMRLabDecision
 };
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FMRLabOnDecision, const FMRLabDecision&);
+
+/** Frank's voice: a procedural sound wave that plays from its own buffer, so audio waiting to be heard can still be
+ * silenced (the visitor talks over him, D113). Add and the queries run on the game thread, the audio on the audio
+ * render thread. */
+UCLASS()
+class UMRLabVoiceWave : public USoundWaveProcedural
+{
+	GENERATED_BODY()
+
+public:
+	UMRLabVoiceWave(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer) {}
+
+	void Add(const int16* Samples, int32 Num);
+	/** Samples waiting to be heard. */
+	int32 Waiting() const;
+	void CopyWaiting(TArray<int16>& Out) const;
+	/** What waits from Offset on becomes silence; the Fade samples before Offset fade out. */
+	void SilenceFrom(int32 Offset, int32 Fade);
+
+	virtual int32 OnGeneratePCMAudio(TArray<uint8>& OutAudio, int32 NumSamples) override;
+
+private:
+	mutable FCriticalSection Lock;
+	TArray<int16> Buffer;
+	int32 Read = 0; // samples of Buffer already heard
+};
 
 /**
  * Spoken conversation with OpenAI gpt-live-1 through the Live API (WebSocket over WinHttp, Windows only).
@@ -108,16 +134,21 @@ public:
 	float SpeakingWeight = 0.f;
 
 	/** Loudness (RMS, 0 to 1) of the visitor audio sent in the latest tick: the microphone, the test input, or in a
-	 * replay the recorded input. The microphone also hears Frank's voice (no echo cancellation, Q24). */
+	 * replay the recorded input. The visitor's clip-on microphone also hears Frank's voice, more quietly (D113). */
 	UPROPERTY(BlueprintReadOnly, Category = "MRLab Live")
 	float VisitorLevel = 0.f;
 
 	/** Every completed decision, parsed, on the game thread (C++ only). */
 	FMRLabOnDecision OnDecision;
 
-	/** FPlatformTime::Seconds() of the latest transcript fragment of the visitor / of Frank (0 before the first). */
-	double LastVisitorFragmentTime() const { return LastUserDelta; }
+	/** FPlatformTime::Seconds() of the latest transcript fragment of Frank (0 before the first). */
 	double LastFrankFragmentTime() const { return LastAgentFragment; }
+
+	/** The visitor talks over Frank (D113): his voice stops at the end of the word being heard (at most 0.5 s on),
+	 * and what the model still says of this answer is not played; his next answer plays again. */
+	void StopAtWordEnd();
+	/** Seconds until the end of his newest words is heard (their text runs ahead of his voice), -1 if unknown. */
+	float FrankWordsLeft() const;
 
 	/** The voice sample (24 kHz, counted from the session start) being heard now. */
 	int64 VoicePlayhead() const { return Playhead; }
@@ -190,7 +221,7 @@ private:
 	TObjectPtr<UAudioComponent> Speaker;
 
 	UPROPERTY()
-	TObjectPtr<USoundWaveProcedural> VoiceWave;
+	TObjectPtr<UMRLabVoiceWave> VoiceWave;
 
 	FAudioGeneratorHandle MicHandle;
 	int32 MicChannels = 1;
@@ -223,6 +254,17 @@ private:
 	TArray<int16> PendingVoice; // received this tick, goes into the wave at the next ReleaseVoice
 	int64 DroppedSilence = 0; // samples of silence dropped to catch up (D111), logged when done
 	int32 SilentFrames = 0;   // consecutive 10 ms frames of exact silence in the released voice
+	int32 LastAgentEndMs = -1; // end_ms of Frank's newest transcript fragment
+	// Stopping at a word end (D113): Finishing plays on until the word ends, Dropping leaves out the rest of the answer.
+	enum class EVoiceCut : uint8 { None, Finishing, Dropping };
+	EVoiceCut VoiceCut = EVoiceCut::None;
+	int32 FinishLeft = 0;   // samples he may still say to end the word
+	float CutPeak = 0.f;    // loudest 10 ms of the voice since the cut
+	int32 CutQuietFrames = 0;
+	double CutAt = 0.0;
+	int64 MuteFrom = 0;     // voice samples silenced in the wave: their lip sync frames are not shown
+	int64 MuteTo = 0;
+	bool WordEnds(const int16* Frame, int32 Num);
 	// The voice ran out without trailing silence (a pause in the stream, an interruption): the face returns to rest.
 	double LastLipSyncTime = 0.0;
 	float DryFade = 1.f;
