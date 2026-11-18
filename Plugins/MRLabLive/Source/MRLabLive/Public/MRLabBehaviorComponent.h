@@ -176,7 +176,7 @@ private:
 	TArray<TPair<FName, float>> BlinkCurves;
 	FName NoticeCategory;     // shown when the visitor speaks after a pause while he looks around
 	// Interrupted: the visitor starts speaking while Frank's voice is heard (a new utterance, at least InterruptInto s
-	// into his turn), then he stops (voice off InterruptStop s) and his last words did not end his turn.
+	// into his turn) and his newest words do not end his turn.
 	FName InterruptCategory;
 	float InterruptValue = 0.f;
 	FName ListenCategory;     // ... then this face after ListenAfter seconds
@@ -184,12 +184,10 @@ private:
 	float ListenAfter = 0.6f;
 	float HeadBackDegrees = 6.f;
 	float InterruptInto = 1.f;      // visitor words earlier in his turn are late transcripts of their previous turn
-	float InterruptStop = 0.3f;
 	float NewUtteranceGap = 1.5f;   // a visitor fragment after this long without one starts a new utterance
 	float InterruptCooldown = 5.f;
 	float InterruptLookSeconds = 2.5f; // eyes on the visitor this long, no aversions
 	double SeenVisitorFragment = 0.0;
-	bool bTalkedOver = false;
 	bool bLastFrankFinished = true; // his latest words: turn_final and a sentence end
 	double LastInterruptAt = -1e9;
 	double ListenAt = -1.0;

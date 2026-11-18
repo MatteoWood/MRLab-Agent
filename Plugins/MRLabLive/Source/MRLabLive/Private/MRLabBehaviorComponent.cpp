@@ -247,7 +247,6 @@ bool UMRLabBehaviorComponent::LoadSettings()
 		ListenValue = NumberOr(*Object, TEXT("then_value"), ListenValue);
 		ListenAfter = NumberOr(*Object, TEXT("then_after"), ListenAfter);
 		InterruptInto = NumberOr(*Object, TEXT("into"), InterruptInto);
-		InterruptStop = NumberOr(*Object, TEXT("stop"), InterruptStop);
 		NewUtteranceGap = NumberOr(*Object, TEXT("new_utterance_gap"), NewUtteranceGap);
 		InterruptCooldown = NumberOr(*Object, TEXT("cooldown"), InterruptCooldown);
 		InterruptLookSeconds = NumberOr(*Object, TEXT("look_seconds"), InterruptLookSeconds);
@@ -716,24 +715,16 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 			UE_LOG(LogMRLabBehavior, Log, TEXT("Noticed the visitor after a silence: %s %.2f"), *NoticeCategory.ToString(), NoticeValue);
 		}
 	}
-	// Interrupted. The Live API gives no signal: the model stops by itself, at the end of a word, and the stream goes
-	// on with silence. So: the visitor starts speaking (a new utterance in their transcript) while his voice is heard,
-	// then he stops, and his last words did not end his turn -> a short surprise with the head tilting back a little,
-	// then his listening face. The transcript, not the microphone level, tells that the visitor speaks over him: the
-	// microphone also hears Frank (Q24).
+	// Interrupted (D110, D112). The Live API gives no signal: the model stops by itself, at the end of a word, about
+	// 1.2 to 2 s after the visitor starts. So he reacts as soon as the visitor's first words arrive (a new utterance in
+	// their transcript) while his voice is heard and his newest words (their text runs ahead of his voice) do not end
+	// his turn: a short surprise with the head tilting back a little, then his listening face. The transcript, not
+	// the microphone level, tells that the visitor speaks over him: the microphone also hears Frank (Q24).
 	const double VisitorFragment = Live ? Live->LastVisitorFragmentTime() : 0.0;
 	if (VisitorFragment > SeenVisitorFragment)
 	{
-		if (VisitorFragment - SeenVisitorFragment > NewUtteranceGap && Turns.bFrankVoice && Now - Turns.FrankTurnStart >= InterruptInto)
-		{
-			bTalkedOver = true;
-		}
-		SeenVisitorFragment = VisitorFragment;
-	}
-	if (bTalkedOver && !Turns.bFrankVoice && Now - Turns.FrankLastVoice >= InterruptStop)
-	{
-		bTalkedOver = false;
-		if (!bLastFrankFinished && Now - LastInterruptAt > InterruptCooldown)
+		if (VisitorFragment - SeenVisitorFragment > NewUtteranceGap && Turns.bFrankVoice && Now - Turns.FrankTurnStart >= InterruptInto
+			&& !bLastFrankFinished && Now - LastInterruptAt > InterruptCooldown)
 		{
 			LastInterruptAt = Now;
 			if (FCategory* Category = FindCategory(InterruptCategory))
@@ -742,8 +733,9 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 			}
 			Gaze.Interrupted(Now, HeadBackDegrees, InterruptLookSeconds);
 			ListenAt = Now + ListenAfter;
-			UE_LOG(LogMRLabBehavior, Log, TEXT("Interrupted: the visitor spoke over him and he stopped unfinished"));
+			UE_LOG(LogMRLabBehavior, Log, TEXT("Interrupted: the visitor speaks over him"));
 		}
+		SeenVisitorFragment = VisitorFragment;
 	}
 	if (ListenAt > 0.0 && Now >= ListenAt)
 	{
@@ -918,8 +910,8 @@ void UMRLabBehaviorComponent::WriteTrace(float Speaking)
 	}
 	TraceNext += TraceInterval;
 	const UMRLabLiveSession* Live = Session.Get();
-	FString Line = FString::Printf(TEXT("{\"t\":%.3f,\"speaking\":%.3f,\"playhead\":%lld,\"waiting\":[%.3f,%.3f],\"valence\":%.3f,\"arousal\":%.3f,\"rapport\":%.3f,\"mood\":%d,"),
-		Now - TraceStart, Speaking, Live ? Live->VoicePlayhead() : 0LL, Live ? Live->VoiceWaiting() : 0.f, Live ? Live->VoiceHeld() : 0.f, Valence, Arousal, Rapport, CurrentMood);
+	FString Line = FString::Printf(TEXT("{\"t\":%.3f,\"speaking\":%.3f,\"playhead\":%lld,\"waiting\":%.3f,\"valence\":%.3f,\"arousal\":%.3f,\"rapport\":%.3f,\"mood\":%d,"),
+		Now - TraceStart, Speaking, Live ? Live->VoicePlayhead() : 0LL, Live ? Live->VoiceWaiting() : 0.f, Valence, Arousal, Rapport, CurrentMood);
 	Line += FString::Printf(TEXT("\"turn\":\"%s\",\"vlevel\":%.4f,\"gaze\":\"%s\",\"tracked\":%d,\"vdist\":%.0f,\"vangle\":%.2f,\"eyes\":[[%.2f,%.2f],[%.2f,%.2f]],")
 		TEXT("\"curves\":[[%.3f,%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f,%.3f]],\"shift\":[%.3f,%.1f],\"blink\":%.3f,\"mblink\":%.3f,\"head\":[%.1f,%.1f,%.1f],\"eyeerr\":[%.2f,%.2f],\"blinks\":[%d,%d],\"shown\":{"),
 		MRLabTurnName(Turns.State), Live ? Live->VisitorLevel : 0.f, GazeKindName(Gaze.Kind), bTraceTracked ? 1 : 0, TraceVisitorDistance, TraceVisitorAngle,

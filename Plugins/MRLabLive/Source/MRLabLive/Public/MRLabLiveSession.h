@@ -121,9 +121,8 @@ public:
 
 	/** The voice sample (24 kHz, counted from the session start) being heard now. */
 	int64 VoicePlayhead() const { return Playhead; }
-	/** Seconds of Frank's voice waiting: in the wave (still to play) and held back (D109). */
+	/** Seconds of Frank's voice waiting in the wave (still to play). */
 	float VoiceWaiting() const { return VoiceQueued - Playhead > 0 ? (VoiceQueued - Playhead) / 24000.f : 0.f; }
-	float VoiceHeld() const { return HeldVoice.Num() / 24000.f; }
 
 	/** The voice sample at which Frank's words starting at StartMs (start_ms of his transcript) are heard, or -1 while
 	 * the audio of his current utterance has not arrived yet. */
@@ -168,10 +167,9 @@ private:
 	void Record(bool bSent, const FString& Message);
 	void Shutdown(const FString& Reason);
 	void AddTranscript(bool bUser, const FString& Delta);
-	void QueueVoice(const int16* Samples, int32 NumSamples);   // received voice: into the hold
-	void ReleaseVoice();                                        // each tick: from the hold into the wave
+	void QueueVoice(const int16* Samples, int32 NumSamples);   // received voice
+	void ReleaseVoice();                                        // each tick: received voice into the wave
 	void EnqueueVoice(const int16* Samples, int32 NumSamples);  // into the wave and the lip sync
-	int32 WordBoundary() const;
 	void UpdateLipSync();
 	void OpenViewSocket();
 	void CloseViewSocket();
@@ -222,12 +220,8 @@ private:
 	int32 AgentAnchorMs = -1;
 	int64 AgentAnchorSample = -1;
 	double LastAgentFragment = 0.0; // FPlatformTime::Seconds() of Frank's latest transcript fragment
-	// Frank's voice is held back VoiceHoldSamples behind the newest received sample, so that when the stream stops
-	// (a pause on the server, an interruption) he can stop at the end of a word instead of mid-word (D109).
-	TArray<int16> HeldVoice;
-	double LastVoiceArrival = 0.0;
-	bool bVoiceCut = false; // played on to a word boundary; the rest waits for more audio
-	int64 DroppedSilence = 0; // samples of silence dropped from the voice cushion (D111), logged when done
+	TArray<int16> PendingVoice; // received this tick, goes into the wave at the next ReleaseVoice
+	int64 DroppedSilence = 0; // samples of silence dropped to catch up (D111), logged when done
 	int32 SilentFrames = 0;   // consecutive 10 ms frames of exact silence in the released voice
 	// The voice ran out without trailing silence (a pause in the stream, an interruption): the face returns to rest.
 	double LastLipSyncTime = 0.0;
