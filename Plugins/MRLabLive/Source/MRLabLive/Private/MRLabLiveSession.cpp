@@ -46,6 +46,12 @@ namespace
 	constexpr int32 VoiceLowWaterSamples = LiveSampleRate * 6 / 100;
 	constexpr double VoiceLateSeconds = 0.08;
 	constexpr int32 BoundaryFrame = LiveSampleRate / 100; // 10 ms
+	// Voice cushion (D111): the audio waiting in the wave is kept near 0.35 s by changing only silence: above 0.5 s
+	// silence is dropped, below 0.25 s silence is lengthened.
+	constexpr int32 CushionLowSamples = LiveSampleRate * 25 / 100;
+	constexpr int32 CushionLevelSamples = LiveSampleRate * 35 / 100;
+	constexpr int32 CushionHighSamples = LiveSampleRate * 50 / 100;
+	constexpr int32 SilenceKeptFrames = 10; // the first 100 ms of a silence never change
 	// Mouth closing in silence: the Live API sends exact zeros between answers. A 20 ms step counts as voice above
 	// this RMS level; the mouth controls fade in within about 60 ms before speech and out over about 200 ms after it.
 	constexpr float VoiceRms = 0.003f;
@@ -880,6 +886,12 @@ void UMRLabLiveSession::SetLipSyncMood(int32 Mood, float Intensity)
 
 void UMRLabLiveSession::QueueVoice(const int16* Samples, int32 NumSamples)
 {
+	if (AgentAnchorMs >= 0 && AgentAnchorSample < 0)
+	{
+		// The first audio of Frank's current utterance arrives now: its place in the voice is after everything queued
+		// and held (anchoring it when it is queued would put it 0.3 s early, by the hold).
+		AgentAnchorSample = VoiceQueued + HeldVoice.Num();
+	}
 	HeldVoice.Append(Samples, NumSamples);
 	LastVoiceArrival = FPlatformTime::Seconds();
 	bVoiceCut = false;
@@ -946,7 +958,58 @@ void UMRLabLiveSession::ReleaseVoice()
 	if (HeldVoice.Num() > VoiceHoldSamples)
 	{
 		const int32 Count = HeldVoice.Num() - VoiceHoldSamples;
-		EnqueueVoice(HeldVoice.GetData(), Count);
+		// Voice cushion (D111). The stream runs in real time: audio that piles up during a stall or a hitch (it comes
+		// as a burst afterwards) would keep him late for the rest of the session, and the stream's small gaps and its
+		// slight slowness would empty a small cushion while he speaks. So the audio waiting in the wave is kept near
+		// CushionLevelSamples by changing only the stream's exact silence (zeros, in 10 ms frames, after the first
+		// 100 ms of a silence, so the short zero runs inside speech never change): above CushionHighSamples silence is
+		// dropped, below CushionLowSamples it is lengthened.
+		const int32 Queued = VoiceWave->GetAvailableAudioByteCount() / sizeof(int16);
+		int32 Drop = Queued + Count > CushionHighSamples ? Queued + Count - CushionLevelSamples : 0;
+		const bool bDropping = Drop > 0;
+		TArray<int16> Kept;
+		Kept.Reserve(Count + CushionLevelSamples);
+		int64 AnchorShift = 0; // silence dropped (+) or added (-) before the start of his current utterance
+		for (int32 Frame = 0; Frame < Count; Frame += BoundaryFrame)
+		{
+			const int32 N = FMath::Min(BoundaryFrame, Count - Frame);
+			bool bZero = N == BoundaryFrame;
+			for (int32 Index = Frame; bZero && Index < Frame + N; ++Index)
+			{
+				bZero = HeldVoice[Index] == 0;
+			}
+			SilentFrames = bZero ? SilentFrames + 1 : 0;
+			if (SilentFrames > SilenceKeptFrames)
+			{
+				if (Drop >= N)
+				{
+					Drop -= N;
+					DroppedSilence += N;
+					AnchorShift += VoiceQueued + Frame < AgentAnchorSample ? N : 0;
+					continue;
+				}
+				const int32 Level = Queued + Kept.Num();
+				if (Level < CushionLowSamples)
+				{
+					Kept.AddZeroed(CushionLevelSamples - Level);
+					AnchorShift -= VoiceQueued + Frame <= AgentAnchorSample ? CushionLevelSamples - Level : 0;
+				}
+			}
+			Kept.Append(HeldVoice.GetData() + Frame, N);
+		}
+		AgentAnchorSample -= AnchorShift;
+		if (!bDropping && DroppedSilence > 0)
+		{
+			if (DroppedSilence >= LiveSampleRate / 2)
+			{
+				UE_LOG(LogMRLabLive, Log, TEXT("Voice caught up: dropped %.2f s of silence"), DroppedSilence / float(LiveSampleRate));
+			}
+			DroppedSilence = 0;
+		}
+		if (Kept.Num() > 0)
+		{
+			EnqueueVoice(Kept.GetData(), Kept.Num());
+		}
 		HeldVoice.RemoveAt(0, Count);
 		return;
 	}
@@ -989,10 +1052,9 @@ void UMRLabLiveSession::EnqueueVoice(const int16* Samples, int32 NumSamples)
 		// Start of the stream, or the voice ran dry: hold it back again by the lip sync delay.
 		Pcm.AddZeroed(VoiceDelaySamples);
 	}
-	if (AgentAnchorMs >= 0 && AgentAnchorSample < 0)
+	if (bDry && AgentAnchorSample >= VoiceQueued)
 	{
-		// The first audio of Frank's current utterance.
-		AgentAnchorSample = VoiceQueued + (bDry ? VoiceDelaySamples : 0);
+		AgentAnchorSample += VoiceDelaySamples; // the start of his utterance is still to come: the delay goes in front
 	}
 	Pcm.Append(Samples, NumSamples);
 	VoiceWave->QueueAudio(reinterpret_cast<const uint8*>(Pcm.GetData()), Pcm.Num() * sizeof(int16));
@@ -1455,6 +1517,8 @@ void UMRLabLiveSession::Shutdown(const FString& Reason)
 	VisitorLevel = 0.f;
 	HeldVoice.Reset();
 	bVoiceCut = false;
+	DroppedSilence = 0;
+	SilentFrames = 0;
 	bTestInput = false;
 	TestPcm.Reset();
 	if (DecisionCount > 0)

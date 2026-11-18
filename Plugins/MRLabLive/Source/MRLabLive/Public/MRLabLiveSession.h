@@ -121,6 +121,9 @@ public:
 
 	/** The voice sample (24 kHz, counted from the session start) being heard now. */
 	int64 VoicePlayhead() const { return Playhead; }
+	/** Seconds of Frank's voice waiting: in the wave (still to play) and held back (D109). */
+	float VoiceWaiting() const { return VoiceQueued - Playhead > 0 ? (VoiceQueued - Playhead) / 24000.f : 0.f; }
+	float VoiceHeld() const { return HeldVoice.Num() / 24000.f; }
 
 	/** The voice sample at which Frank's words starting at StartMs (start_ms of his transcript) are heard, or -1 while
 	 * the audio of his current utterance has not arrived yet. */
@@ -224,6 +227,8 @@ private:
 	TArray<int16> HeldVoice;
 	double LastVoiceArrival = 0.0;
 	bool bVoiceCut = false; // played on to a word boundary; the rest waits for more audio
+	int64 DroppedSilence = 0; // samples of silence dropped from the voice cushion (D111), logged when done
+	int32 SilentFrames = 0;   // consecutive 10 ms frames of exact silence in the released voice
 	// The voice ran out without trailing silence (a pause in the stream, an interruption): the face returns to rest.
 	double LastLipSyncTime = 0.0;
 	float DryFade = 1.f;
