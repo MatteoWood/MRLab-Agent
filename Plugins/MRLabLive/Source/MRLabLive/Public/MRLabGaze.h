@@ -136,6 +136,14 @@ struct FMRLabGaze
 
 	void Load(const TSharedPtr<FJsonObject>& Object);
 	void Update(const FMRLabGazeInput& In);
+	/** Interrupted: the head tilts back by Degrees within 0.25 s, holds 0.3 s and eases back over 1 s; the eyes stay on
+	 * the visitor for HoldSeconds (no aversions). */
+	void Interrupted(double Now, float Degrees, float HoldSeconds)
+	{
+		HeadBackStart = Now;
+		HeadBackDegrees = Degrees;
+		HoldVisitorUntil = Now + HoldSeconds;
+	}
 
 	// Output.
 	float Curves[2][4] = {};         // per eye: look right, left, up, down
@@ -165,6 +173,9 @@ private:
 	double NoticeAt = -1.0;
 	double ThinkUntil = -1.0;
 	double ReturnAt = -1.0;          // the visitor spoke: turn to them at this time
+	double HeadBackStart = -1e9;
+	float HeadBackDegrees = 0.f;
+	double HoldVisitorUntil = -1e9;
 	double AvertStart = -1e9;
 	double SpeakingEndedAt = -1e9;   // when his last stretch of speaking ended
 	double LastPhraseSeen = -1e9;

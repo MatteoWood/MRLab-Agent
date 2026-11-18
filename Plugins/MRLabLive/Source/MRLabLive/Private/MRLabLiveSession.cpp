@@ -41,6 +41,11 @@ namespace
 	constexpr int32 LookaheadMs = 80;
 	// The voice is held back by the lookahead plus a margin for solving, so each frame is ready before its sound plays.
 	constexpr int32 VoiceDelaySamples = (LookaheadMs + 40) * LiveSampleRate / 1000;
+	// Voice hold (D109): 0.3 s; the stream counts as late after 0.08 s without audio, when the wave holds under 0.06 s.
+	constexpr int32 VoiceHoldSamples = LiveSampleRate * 3 / 10;
+	constexpr int32 VoiceLowWaterSamples = LiveSampleRate * 6 / 100;
+	constexpr double VoiceLateSeconds = 0.08;
+	constexpr int32 BoundaryFrame = LiveSampleRate / 100; // 10 ms
 	// Mouth closing in silence: the Live API sends exact zeros between answers. A 20 ms step counts as voice above
 	// this RMS level; the mouth controls fade in within about 60 ms before speech and out over about 200 ms after it.
 	constexpr float VoiceRms = 0.003f;
@@ -875,6 +880,108 @@ void UMRLabLiveSession::SetLipSyncMood(int32 Mood, float Intensity)
 
 void UMRLabLiveSession::QueueVoice(const int16* Samples, int32 NumSamples)
 {
+	HeldVoice.Append(Samples, NumSamples);
+	LastVoiceArrival = FPlatformTime::Seconds();
+	bVoiceCut = false;
+}
+
+int32 UMRLabLiveSession::WordBoundary() const
+{
+	// The held audio in 10 ms frames: all quiet (trailing silence) = everything may play; otherwise the middle of the
+	// last quiet stretch of at least 30 ms (a pause between words; the fading end of a cut word is shorter), or 0.
+	const int32 Frames = HeldVoice.Num() / BoundaryFrame;
+	if (Frames == 0)
+	{
+		return HeldVoice.Num();
+	}
+	TArray<float> Rms;
+	Rms.SetNumZeroed(Frames);
+	float Peak = 0.f;
+	for (int32 Frame = 0; Frame < Frames; ++Frame)
+	{
+		double Sum = 0.0;
+		for (int32 Index = Frame * BoundaryFrame; Index < (Frame + 1) * BoundaryFrame; ++Index)
+		{
+			const double Value = HeldVoice[Index] / 32768.0;
+			Sum += Value * Value;
+		}
+		Rms[Frame] = float(FMath::Sqrt(Sum / BoundaryFrame));
+		Peak = FMath::Max(Peak, Rms[Frame]);
+	}
+	if (Peak < 0.01f)
+	{
+		return HeldVoice.Num();
+	}
+	const float Quiet = FMath::Max(0.006f, 0.2f * Peak);
+	if (Frames >= 3 && Rms[Frames - 1] < Quiet && Rms[Frames - 2] < Quiet && Rms[Frames - 3] < Quiet)
+	{
+		return HeldVoice.Num(); // it ends in a pause: the word is complete
+	}
+	for (int32 Frame = Frames - 1; Frame >= 0; --Frame)
+	{
+		if (Rms[Frame] < Quiet)
+		{
+			int32 First = Frame;
+			while (First > 0 && Rms[First - 1] < Quiet)
+			{
+				--First;
+			}
+			if (Frame - First + 1 >= 3)
+			{
+				return (First + Frame + 1) * BoundaryFrame / 2;
+			}
+			Frame = First; // too short: keep looking further back
+		}
+	}
+	return 0;
+}
+
+void UMRLabLiveSession::ReleaseVoice()
+{
+	if (!VoiceWave || HeldVoice.Num() == 0)
+	{
+		return;
+	}
+	// Normal flow: everything but the newest VoiceHoldSamples goes on.
+	if (HeldVoice.Num() > VoiceHoldSamples)
+	{
+		const int32 Count = HeldVoice.Num() - VoiceHoldSamples;
+		EnqueueVoice(HeldVoice.GetData(), Count);
+		HeldVoice.RemoveAt(0, Count);
+		return;
+	}
+	// The stream is late and the wave is nearly empty: play on to the last word boundary in what is held, faded over
+	// 10 ms, and keep the rest; it plays when the stream resumes (the Live API streams continuously, so a late stream
+	// is a stall in the network or the client and the missing audio follows).
+	const int32 Queued = VoiceWave->GetAvailableAudioByteCount() / sizeof(int16);
+	if (bVoiceCut || Queued > VoiceLowWaterSamples || FPlatformTime::Seconds() - LastVoiceArrival < VoiceLateSeconds)
+	{
+		return;
+	}
+	const int32 Cut = WordBoundary();
+	bVoiceCut = true;
+	if (Cut <= 0)
+	{
+		UE_LOG(LogMRLabLive, Log, TEXT("Voice late: no word boundary in the %.2f s held, stopped before it"), HeldVoice.Num() / float(LiveSampleRate));
+		return;
+	}
+	TArray<int16> Part(HeldVoice.GetData(), Cut);
+	const int32 Fade = FMath::Min(Cut, BoundaryFrame);
+	for (int32 Index = 0; Index < Fade; ++Index)
+	{
+		int16& Sample = Part[Cut - Fade + Index];
+		Sample = int16(Sample * (1.f - float(Index + 1) / Fade));
+	}
+	EnqueueVoice(Part.GetData(), Cut);
+	HeldVoice.RemoveAt(0, Cut);
+	if (HeldVoice.Num() > 0)
+	{
+		UE_LOG(LogMRLabLive, Log, TEXT("Voice late: played on to a word boundary, %.2f s held back"), HeldVoice.Num() / float(LiveSampleRate));
+	}
+}
+
+void UMRLabLiveSession::EnqueueVoice(const int16* Samples, int32 NumSamples)
+{
 	TArray<int16> Pcm;
 	const bool bDry = VoiceWave->GetAvailableAudioByteCount() == 0;
 	if (bDry)
@@ -1286,6 +1393,7 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 		{
 			VisitorLevel = ReplayLevels[ReplayLevelNext++].Value;
 		}
+		ReleaseVoice();
 		UpdateLipSync();
 		if (ReplayNext >= ReplayEvents.Num() && (ReplayEvents.Num() == 0 || Elapsed > ReplayEvents.Last().Key + 2.0))
 		{
@@ -1293,6 +1401,7 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 		}
 		return;
 	}
+	ReleaseVoice();
 	UpdateLipSync();
 
 	ReceiveViews();
@@ -1344,6 +1453,8 @@ void UMRLabLiveSession::Shutdown(const FString& Reason)
 	ReplayEvents.Reset();
 	ReplayLevels.Reset();
 	VisitorLevel = 0.f;
+	HeldVoice.Reset();
+	bVoiceCut = false;
 	bTestInput = false;
 	TestPcm.Reset();
 	if (DecisionCount > 0)

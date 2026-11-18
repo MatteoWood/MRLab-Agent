@@ -74,6 +74,10 @@
       "CTRL_expressions_mouthPressUL": 0.4, "CTRL_expressions_mouthPressUR": 0.4,
       "CTRL_expressions_mouthPressDL": 0.4, "CTRL_expressions_mouthPressDR": 0.4,
       "CTRL_expressions_noseWrinkleL": 0.15, "CTRL_expressions_noseWrinkleR": 0.15 } },
+    "interrupted": { "hold": 0.5, "gain": 1.0, "valence": 0, "flash": 0.3, "recipe": {
+      "CTRL_expressions_browRaiseInL": 0.7, "CTRL_expressions_browRaiseInR": 0.7,
+      "CTRL_expressions_browRaiseOuterL": 0.6, "CTRL_expressions_browRaiseOuterR": 0.6,
+      "CTRL_expressions_eyeWidenL": 0.35, "CTRL_expressions_eyeWidenR": 0.35 } },
     "noticing": { "hold": 0.6, "gain": 1.0, "valence": 0, "flash": 0.2, "recipe": {
       "CTRL_expressions_browRaiseInL": 0.55, "CTRL_expressions_browRaiseInR": 0.55,
       "CTRL_expressions_browRaiseOuterL": 0.5, "CTRL_expressions_browRaiseOuterR": 0.5,
@@ -95,6 +99,7 @@
     "surprised": { "mood": 5, "intensity": 0.5, "valence": 0 },
     "serious": { "mood": 2, "intensity": 0.3, "valence": -0.3 }
   },
+  "interrupted": { "_about": "Interrupted (owner, D110): the visitor starts speaking (a new utterance in their transcript, the first words after new_utterance_gap s without any) while his voice is heard, at least into s into his turn; when his voice has then been off stop s and his last words did not end his turn (turn_final and a sentence end), a short surprise and the head tilting back by head_back_degrees, then the then face after then_after s; the eyes stay on the visitor for look_seconds s; at most once in cooldown s.", "category": "interrupted", "value": 0.7, "then": "interested", "then_value": 0.35, "then_after": 0.6, "head_back_degrees": 6, "into": 1.0, "stop": 0.3, "new_utterance_gap": 1.5, "cooldown": 5, "look_seconds": 2.5 },
   "notice": { "_about": "When the visitor speaks after a pause (or no conversation) while Frank looks around: a small brow raise as he looks back (owner, D107).", "category": "noticing", "value": 0.6 },
   "turns": {
     "_about": "Who speaks, for gaze and blinks (README 4.10). Frank's voice from the lip sync's mouth weight; the visitor from the loudness of the audio sent (microphone or test input), counted only after Frank has been silent echo_guard_seconds (no echo cancellation, Q24). Frank's turn ends after frank_end_quick of silence once the words Decisions marked turn_final were heard, else after frank_end_seconds: pauses inside his answers reach 1.7 s (replay, 2026-11-17).",

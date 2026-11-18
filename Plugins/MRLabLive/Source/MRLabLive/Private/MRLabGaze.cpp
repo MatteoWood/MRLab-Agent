@@ -464,7 +464,17 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		AvertStart = Now;
 	};
 
-	switch (T.State)
+	if (Now < HoldVisitorUntil)
+	{
+		// Interrupted: on the visitor for a moment, whatever the state; no aversion at his next phrase start.
+		if (Kind != EKind::Visitor)
+		{
+			OnVisitor(EKind::Visitor, Forever);
+		}
+		LastPhraseSeen = T.PhraseStartAt;
+		NextAversion = FMath::Max(NextAversion, Now + 2.0);
+	}
+	else switch (T.State)
 	{
 	case EMRLabTurn::Outside:
 		if (bTurnChanged)
@@ -803,7 +813,11 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 	Spring(HeadYaw, HeadYawVel, HeadYaw + FMath::FindDeltaAngleDegrees(HeadYaw, HeadYawA));
 	Spring(HeadPitch, HeadPitchVel, HeadPitchA);
 	HeadDist += (ToAnchor.Size() - HeadDist) * (1.f - FMath::Exp(-Dt / 0.3f));
-	HeadTarget = Mid + FRotator(HeadPitch, HeadYaw, 0.f).Vector() * HeadDist;
+	// A startle on top: up within 0.25 s, held 0.3 s, back over 1 s.
+	const float Back = float(In.Now - HeadBackStart);
+	const float BackShare = Back < 0.25f ? FMath::SmoothStep(0.f, 0.25f, Back)
+		: Back < 0.55f ? 1.f : 1.f - FMath::SmoothStep(0.55f, 1.55f, Back);
+	HeadTarget = Mid + FRotator(HeadPitch + HeadBackDegrees * BackShare, HeadYaw, 0.f).Vector() * HeadDist;
 	bHeadValid = true;
 }
 

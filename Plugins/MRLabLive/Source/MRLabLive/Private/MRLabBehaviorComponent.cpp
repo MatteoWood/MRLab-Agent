@@ -232,6 +232,27 @@ bool UMRLabBehaviorComponent::LoadSettings()
 		}
 		NoticeValue = NumberOr(*Object, TEXT("value"), NoticeValue);
 	}
+	if (Root->TryGetObjectField(TEXT("interrupted"), Object))
+	{
+		FString Name;
+		if ((*Object)->TryGetStringField(TEXT("category"), Name))
+		{
+			InterruptCategory = FName(Name);
+		}
+		if ((*Object)->TryGetStringField(TEXT("then"), Name))
+		{
+			ListenCategory = FName(Name);
+		}
+		InterruptValue = NumberOr(*Object, TEXT("value"), InterruptValue);
+		ListenValue = NumberOr(*Object, TEXT("then_value"), ListenValue);
+		ListenAfter = NumberOr(*Object, TEXT("then_after"), ListenAfter);
+		InterruptInto = NumberOr(*Object, TEXT("into"), InterruptInto);
+		InterruptStop = NumberOr(*Object, TEXT("stop"), InterruptStop);
+		NewUtteranceGap = NumberOr(*Object, TEXT("new_utterance_gap"), NewUtteranceGap);
+		InterruptCooldown = NumberOr(*Object, TEXT("cooldown"), InterruptCooldown);
+		InterruptLookSeconds = NumberOr(*Object, TEXT("look_seconds"), InterruptLookSeconds);
+		HeadBackDegrees = NumberOr(*Object, TEXT("head_back_degrees"), HeadBackDegrees);
+	}
 	if (Root->TryGetObjectField(TEXT("turns"), Object))
 	{
 		Turns.Load(*Object);
@@ -437,6 +458,9 @@ void UMRLabBehaviorComponent::HandleFrank(const FMRLabDecision& Decision)
 	const FMRLabAnswer* Delivery = Decision.Find(TEXT("delivery"));
 	const FMRLabAnswer* Final = Decision.Find(TEXT("turn_final"));
 	const bool bTurnFinal = Final && Final->Value >= 0.6f;
+	// The newest of his words (their text runs ahead of his voice; when he stops, these are the last ones heard).
+	const FString Words = Decision.Text.TrimEnd();
+	bLastFrankFinished = bTurnFinal && (Words.EndsWith(TEXT(".")) || Words.EndsWith(TEXT("!")) || Words.EndsWith(TEXT("?")));
 	if (!Delivery || Delivery->Probability(Delivery->Choice) < MinProbability || Delivery->Confidence < MinConfidence)
 	{
 		if (bTurnFinal)
@@ -690,6 +714,43 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 		{
 			Apply(*Category, NoticeValue);
 			UE_LOG(LogMRLabBehavior, Log, TEXT("Noticed the visitor after a silence: %s %.2f"), *NoticeCategory.ToString(), NoticeValue);
+		}
+	}
+	// Interrupted. The Live API gives no signal: the model stops by itself, at the end of a word, and the stream goes
+	// on with silence. So: the visitor starts speaking (a new utterance in their transcript) while his voice is heard,
+	// then he stops, and his last words did not end his turn -> a short surprise with the head tilting back a little,
+	// then his listening face. The transcript, not the microphone level, tells that the visitor speaks over him: the
+	// microphone also hears Frank (Q24).
+	const double VisitorFragment = Live ? Live->LastVisitorFragmentTime() : 0.0;
+	if (VisitorFragment > SeenVisitorFragment)
+	{
+		if (VisitorFragment - SeenVisitorFragment > NewUtteranceGap && Turns.bFrankVoice && Now - Turns.FrankTurnStart >= InterruptInto)
+		{
+			bTalkedOver = true;
+		}
+		SeenVisitorFragment = VisitorFragment;
+	}
+	if (bTalkedOver && !Turns.bFrankVoice && Now - Turns.FrankLastVoice >= InterruptStop)
+	{
+		bTalkedOver = false;
+		if (!bLastFrankFinished && Now - LastInterruptAt > InterruptCooldown)
+		{
+			LastInterruptAt = Now;
+			if (FCategory* Category = FindCategory(InterruptCategory))
+			{
+				Apply(*Category, InterruptValue);
+			}
+			Gaze.Interrupted(Now, HeadBackDegrees, InterruptLookSeconds);
+			ListenAt = Now + ListenAfter;
+			UE_LOG(LogMRLabBehavior, Log, TEXT("Interrupted: the visitor spoke over him and he stopped unfinished"));
+		}
+	}
+	if (ListenAt > 0.0 && Now >= ListenAt)
+	{
+		ListenAt = -1.0;
+		if (FCategory* Category = FindCategory(ListenCategory))
+		{
+			Apply(*Category, ListenValue);
 		}
 	}
 	if (Turns.State != LoggedTurn)

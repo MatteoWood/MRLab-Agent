@@ -165,7 +165,10 @@ private:
 	void Record(bool bSent, const FString& Message);
 	void Shutdown(const FString& Reason);
 	void AddTranscript(bool bUser, const FString& Delta);
-	void QueueVoice(const int16* Samples, int32 NumSamples);
+	void QueueVoice(const int16* Samples, int32 NumSamples);   // received voice: into the hold
+	void ReleaseVoice();                                        // each tick: from the hold into the wave
+	void EnqueueVoice(const int16* Samples, int32 NumSamples);  // into the wave and the lip sync
+	int32 WordBoundary() const;
 	void UpdateLipSync();
 	void OpenViewSocket();
 	void CloseViewSocket();
@@ -216,6 +219,11 @@ private:
 	int32 AgentAnchorMs = -1;
 	int64 AgentAnchorSample = -1;
 	double LastAgentFragment = 0.0; // FPlatformTime::Seconds() of Frank's latest transcript fragment
+	// Frank's voice is held back VoiceHoldSamples behind the newest received sample, so that when the stream stops
+	// (a pause on the server, an interruption) he can stop at the end of a word instead of mid-word (D109).
+	TArray<int16> HeldVoice;
+	double LastVoiceArrival = 0.0;
+	bool bVoiceCut = false; // played on to a word boundary; the rest waits for more audio
 	// The voice ran out without trailing silence (a pause in the stream, an interruption): the face returns to rest.
 	double LastLipSyncTime = 0.0;
 	float DryFade = 1.f;
