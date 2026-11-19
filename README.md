@@ -57,8 +57,8 @@ As stated by the project owner (Matteo Bosco). Wording kept close to the origina
 | Moverse network endpoint | Live Link source address and port: kept only in each machine's local `CLAUDE.md` (rule in section 2). The plugin binds this address (UDP) on the PC that runs Unreal, so it is the rendering PC's own address, where the Tracking PC sends the data (from the plugin source); only one process on the PC receives the data. | Lab preset `LiveLinkMoverseMRLab`, plugin source |
 | Moverse coordinates | Head bone `moverserig_Head` in cm; after the axis conversion in `NDC_Basic` (4.4): +X towards the wall, Z = height above the floor. Measured 2026-10-21: middle of the wall surface at tracking (309, 16). | Calibration run (4.4) |
 | Frontal camera on top of the wall | One of the 8 Moverse OAK-D-W-PoE cameras, on top of the wall, right above where the agent stands; connected to the tracking PC like the others. Used for vision (4.12). Device ID not known yet. | Owner, 2026-11-09 |
-| Tracking PC | Runs the Moverse hub; all 8 OAK cameras are connected to it (PoE); networked with the rendering PC. Moverse runs its body-tracking AI on its NVIDIA GPU, so the GPU is free for the vision model when Moverse is closed. Exact GPU and installed software not checked. | Owner, Moverse docs |
-| Lab rendering PC | Ran the 5.7 lab project through Switchboard as nDisplay node `Node_0` (host: the rendering PC itself, fullscreen 2560x1536). Now runs UE 5.8. Displays: `DISPLAY2` 2560x1536 at (0, 0), primary, Z8t DP (the wall); `DISPLAY3` 2560x1536 at (2560, 0), Z8t HDMI; `DISPLAY1` 1920x1080 at (5120, 0), operator monitor. | Lab logs, owner, Windows |
+| Tracking PC | Runs the Moverse hub; all 8 OAK cameras are connected to it (PoE); networked with the rendering PC. Moverse runs its body-tracking AI on its NVIDIA GPU, so the GPU is free for the vision model when Moverse is closed. GPU: NVIDIA RTX 5090 (owner, 2026-11-19; not read on the PC). Installed software not checked. | Owner, Moverse docs |
+| Lab rendering PC | Ran the 5.7 lab project through Switchboard as nDisplay node `Node_0` (host: the rendering PC itself, fullscreen 2560x1536). Now runs UE 5.8. Displays: `DISPLAY2` 2560x1536 at (0, 0), primary, Z8t DP (the wall); `DISPLAY3` 2560x1536 at (2560, 0), Z8t HDMI; `DISPLAY1` 1920x1080 at (5120, 0), operator monitor. GPU: NVIDIA RTX PRO 6000 (owner, 2026-11-19, "RTX 6000 Pro"; exact edition not read on the PC). | Lab logs, owner, Windows |
 | Engine modification on the lab PC | Someone in the lab edited nDisplay's output remap shader in the engine installs: `UE_5.8\Engine\Plugins\Runtime\nDisplay\Shaders\Private\OutputRemapShaders.usf` (2026-09-16, original kept as `OutputRemapShadersBACKUP.usf`) and the 5.7 equivalent (2026-04-09). For source pixels with x < 2560 it samples at 2560 - x and discards every other pixel in a checkerboard; pixels with x >= 2560 pass unchanged. The 3D output of this project depends on it (4.3). The laptop's engine is unmodified (checked 2026-10-27: no backup copy, same install date as the other nDisplay shaders). | Lab PC files |
 
 ### 3.2 Machines
@@ -576,6 +576,11 @@ Process:
 ## 8. Work log
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
+
+### 2026-11-19 (Claude Code, laptop): lab graphics cards recorded
+Done:
+- Owner: the tracking PC has an NVIDIA RTX 5090, the rendering PC (LED wall) an NVIDIA RTX PRO 6000. Added to section 3.1.
+Not verified: both models were not read on the PCs; their speed with our models is still a lab item.
 
 ### 2026-11-19 (Claude Code, laptop): Step 9C, breath removed
 Done:
