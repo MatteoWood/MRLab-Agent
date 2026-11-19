@@ -713,7 +713,6 @@ void UMRLabLiveSession::HandleMessage(const FString& Message)
 			{
 				AgentAnchorMs = StartMs;
 				AgentAnchorSample = -1;
-				UtteranceTextAt = Now;
 			}
 			if (bLastSpeakerUser && VoiceCut != EVoiceCut::None)
 			{

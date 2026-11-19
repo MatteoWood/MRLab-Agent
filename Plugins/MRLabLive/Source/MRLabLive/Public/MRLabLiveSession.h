@@ -146,9 +146,6 @@ public:
 
 	/** FPlatformTime::Seconds() of the latest transcript fragment of Frank (0 before the first). */
 	double LastFrankFragmentTime() const { return LastAgentFragment; }
-	/** FPlatformTime::Seconds() when the first text of Frank's newest utterance arrived (0 before the first). His voice
-	 * usually follows about 1.4 s later (README 4.13): the cue for his breath in before speaking. */
-	double FrankUtteranceTextTime() const { return UtteranceTextAt; }
 
 	/** The visitor talks over Frank (D113): his voice stops at the end of the word being heard (at most 0.5 s on),
 	 * and what the model still says of this answer is not played; his next answer plays again. */
@@ -273,7 +270,6 @@ private:
 	int64 SilencedSamples = 0;  // silenced, not yet told to the lip sync
 	TMap<FName, float> MuteHold; // the lip sync face when the word ended, held while the rest is silent
 	bool bMuteHeld = false;
-	double UtteranceTextAt = 0.0; // FPlatformTime::Seconds() when the first text of Frank's newest utterance arrived
 	bool WordEnds(const int16* Frame, int32 Num);
 	// The voice ran out without trailing silence (a pause in the stream, an interruption): the face returns to rest.
 	double LastLipSyncTime = 0.0;

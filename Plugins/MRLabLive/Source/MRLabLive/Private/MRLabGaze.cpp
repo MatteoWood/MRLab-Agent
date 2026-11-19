@@ -817,7 +817,7 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 	const float Back = float(In.Now - HeadBackStart);
 	const float BackShare = Back < 0.25f ? FMath::SmoothStep(0.f, 0.25f, Back)
 		: Back < 0.55f ? 1.f : 1.f - FMath::SmoothStep(0.55f, 1.55f, Back);
-	HeadTarget = Mid + FRotator(HeadPitch + HeadBackDegrees * BackShare + In.HeadPitchOffset, HeadYaw, 0.f).Vector() * HeadDist;
+	HeadTarget = Mid + FRotator(HeadPitch + HeadBackDegrees * BackShare, HeadYaw, 0.f).Vector() * HeadDist;
 	bHeadValid = true;
 }
 
