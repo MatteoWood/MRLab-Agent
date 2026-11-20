@@ -1,8 +1,9 @@
 @echo off
 rem Double-click (LED wall PC): brings this project folder to the newest version from GitHub (README 4.1).
 rem   update.bat c2f6a54   brings it to a given version instead.
-rem Tools\update.py does the work with the engine's Python; no Git or Git LFS needed. It never writes the
-rem locked NDC_Basic files, Saved, Plugins\MoversePlugin or CLAUDE.md, and keeps a copy of every file it replaces.
+rem Tools\update.py does the work with the engine's Python; no Git or Git LFS needed. It never writes Saved,
+rem Plugins\MoversePlugin or CLAUDE.md, writes the locked NDC_Basic files only when you answer yes to its
+rem question, and keeps a copy of every file it replaces.
 rem Everything is in one block, which Windows reads whole before running it: the update may replace this
 rem file itself while it runs.
 (

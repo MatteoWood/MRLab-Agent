@@ -2,6 +2,7 @@ r"""Brings this project folder (the LED wall PC's copy of the repo) to a version
 Usually started by double-clicking update.bat in the project folder (README 4.1); or, in that folder:
     "C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\ThirdParty\Python3\Win64\python.exe" -I Tools\update.py
     ... -I Tools\update.py c2f6a54    a given version (a commit) instead of the newest
+    ... -I Tools\update.py locked     also takes the locked NDC_Basic files without asking (see below)
 
 Same idea as TrackingPC\tools\update.py, for the whole project; no Git or Git LFS needed:
 - it compares every file of the version with the file here (as stored in Git, as its LFS pointer, or with
@@ -9,9 +10,11 @@ Same idea as TrackingPC\tools\update.py, for the whole project; no Git or Git LF
 - it refuses while Unreal runs (editor or nDisplay window), and checks that every file to replace can be
   written; if anything fails before the first file is replaced, nothing is changed;
 - each replaced file is first copied to Saved\UpdateBackup\<date_time>\;
-- the locked nDisplay config NDC_Basic and its level actor (README 4.3) are never written, only reported
-  when they differ; Saved, Plugins\MoversePlugin, CLAUDE.md and other untracked files are never written;
-  files here that the version does not have are listed and kept (nothing is deleted);
+- the locked nDisplay config NDC_Basic and its level actor (README 4.3) are written only when you say so: when
+  one differs, the update says which commit changed it and whether the file here is an earlier version from
+  the repo or has changes made on this PC, and asks; anything but "yes" keeps the file here;
+- Saved, Plugins\MoversePlugin, CLAUDE.md and other untracked files are never written; files here that the
+  version does not have are listed and kept (nothing is deleted);
 - if the folder is a Git clone and Git is installed, Git's record of the version (HEAD and index) is moved to
   the new version afterwards (git fetch, git reset), so git status shows only real differences. The files
   are not touched by that.
@@ -100,6 +103,52 @@ def inside(path):
     return target
 
 
+def locked_changes(sha, path, target):
+    """What to tell about a locked file that differs: (the commit that last changed it in this version, what the
+    file here is). One more question to GitHub per file."""
+    try:
+        data = target.read_bytes()
+    except OSError:
+        return "", "there is no such file here"
+    if data.startswith(LFS):
+        return "", "the file here is only a placeholder, not the real file"
+    try:
+        commits = json.loads(fetch(f"https://api.github.com/repos/{REPO}/commits?path={urllib.parse.quote(path)}"
+                                   f"&sha={sha}&per_page=6"))
+    except Exception:
+        return "", "could not ask GitHub about the file's earlier versions"
+    last = commits[0]
+    changed = f"{last['sha'][:7]} of {last['commit']['committer']['date'][:10]}: {last['commit']['message'].splitlines()[0]}"
+    for earlier in commits[1:]:
+        try:
+            old = fetch(f"https://raw.githubusercontent.com/{REPO}/{earlier['sha']}/{urllib.parse.quote(path)}")
+        except Exception:
+            continue
+        if old in (data, pointer(data)):
+            return changed, (f"the file here is the repo's earlier version ({earlier['sha'][:7]} of "
+                             f"{earlier['commit']['committer']['date'][:10]}), without changes made on this PC")
+    return changed, "the file here is NOT a version from the repo: it has changes made on this PC, which a replacement would drop"
+
+
+def take_locked(sha, path, target, without_asking):
+    """Whether to replace a locked file that differs (README 4.3: only when a change to NDC_Basic was agreed)."""
+    changed, here = locked_changes(sha, path, target)
+    print(f"\nLOCKED (README 4.3), differs from this version: {path}")
+    if changed:
+        print(f"  last changed in this version by {changed}")
+    print(f"  {here}")
+    if without_asking:
+        print("  replaced, as asked (locked)")
+        return True
+    print("  Replace it with this version's file? Only if this change to NDC_Basic was agreed. The file here is kept\n"
+          "  in Saved\\UpdateBackup, and the 3D on the wall should be checked afterwards.")
+    try:
+        answer = input("  Type yes to replace it, or just press Enter to keep the file here: ")
+    except EOFError:
+        answer = ""
+    return answer.strip().lower() == "yes"
+
+
 def record_in_git(sha):
     """Moves Git's record of the version to sha (git fetch, git reset --mixed); the files are not touched."""
     if not (HERE / ".git").exists() or shutil.which("git") is None:
@@ -120,7 +169,9 @@ def main():
     if "UnrealEditor.exe" in tasks:
         sys.exit("Unreal is still running (editor or nDisplay window): close it and run the update again. "
                  "Nothing was changed.")
-    wanted = sys.argv[1] if len(sys.argv) > 1 else "main"
+    arguments = [a for a in sys.argv[1:] if a.lower() != "locked"]
+    without_asking = len(arguments) < len(sys.argv) - 1
+    wanted = arguments[0] if arguments else "main"
     try:
         commit = json.loads(fetch(f"https://api.github.com/repos/{REPO}/commits/{wanted}"))
         tree = json.loads(fetch(f"https://api.github.com/repos/{REPO}/git/trees/"
@@ -140,9 +191,8 @@ def main():
         if target is None:
             print(f"  skipped {path}: not to be written by an update")
         elif not same(target, blob):
-            if path in LOCKED:
-                placeholder = target.is_file() and target.read_bytes().startswith(LFS)
-                locked.append(path + (" (here it is only a placeholder, not the real file)" if placeholder else ""))
+            if path in LOCKED and not take_locked(sha, path, target, without_asking):
+                locked.append(path)
             else:
                 changed[path] = target
     shutil.rmtree(STAGE, ignore_errors=True)
@@ -177,7 +227,10 @@ def main():
     if BACKUP.exists():
         print(f"The replaced files are kept in {BACKUP.relative_to(HERE)}")
     for path in locked:
-        print(f"NOT replaced, locked (README 4.3), differs from this version: {path}")
+        print(f"NOT replaced, locked (README 4.3), still differs from this version: {path}")
+    for path in changed:
+        if path in LOCKED:
+            print(f"REPLACED, locked (README 4.3): {path}. Check the 3D on the wall.")
     extra = sorted(p.relative_to(HERE).as_posix() for folder in ("Content", "Config")
                    for p in (HERE / folder).rglob("*") if p.is_file() and p.relative_to(HERE).as_posix() not in blobs)
     if extra:
