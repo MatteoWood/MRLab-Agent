@@ -349,8 +349,8 @@ void UMRLabBehaviorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	if (GazeTicks > 0)
 	{
-		UE_LOG(LogMRLabBehavior, Log, TEXT("Eyes: %d updates, %.3f ms each; blinks: own %d, lip sync model %d"),
-			GazeTicks, GazeCost / GazeTicks * 1000.0, Blinks.OwnCount, Blinks.ModelCount);
+		UE_LOG(LogMRLabBehavior, Log, TEXT("Eyes: %d updates, %.3f ms each; blinks: own %d, lip sync model %d (%d left out, too soon)"),
+			GazeTicks, GazeCost / GazeTicks * 1000.0, Blinks.OwnCount, Blinks.ModelCount, Blinks.DroppedCount);
 	}
 	TraceFile.Reset();
 	Super::EndPlay(EndPlayReason);
@@ -764,6 +764,11 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 			}
 		}
 	}
+	// While the visitor speaks over him he looks at them (owner, D124), also when he goes on to finish.
+	if (LoudSince >= 0.0 && Now - LoudSince >= InterruptMinSpeech && Turns.State == EMRLabTurn::Speaking)
+	{
+		Gaze.HoldVisitor(Now + 0.5);
+	}
 	if (ListenAt > 0.0 && Now >= ListenAt)
 	{
 		ListenAt = -1.0;
@@ -779,7 +784,6 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 	}
 
 	OverrideCurves.Reset();
-	BlinkCurves.Reset();
 	USkeletalMeshComponent* Face = FaceMesh.Get();
 	if (!Face || Face->GetBoneIndex(EyeBones[0]) == INDEX_NONE || Face->GetBoneIndex(EyeBones[1]) == INDEX_NONE)
 	{
@@ -804,8 +808,6 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 		}
 	}
 	In.Turns = &Turns;
-	In.Arousal = Arousal;
-	In.Rapport = Rapport;
 	Gaze.Update(In);
 
 	TraceModelBlink = Live ? FMath::Max(Live->LipSyncCurves.FindRef(BlinkCurveNames[0]), Live->LipSyncCurves.FindRef(BlinkCurveNames[1])) : 0.f;
@@ -839,7 +841,7 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 			{
 				OverrideCurves.Emplace(Gaze.Eyes[Eye].Curves[Curve], Gaze.Curves[Eye][Curve]);
 			}
-			BlinkCurves.Emplace(BlinkCurveNames[Eye], Blinks.Value);
+			OverrideCurves.Emplace(BlinkCurveNames[Eye], Blinks.Value); // replaces the model's (its blinks are in it)
 		}
 		// Head target into the body post-process AnimBP (its Look At nodes), before its animation update.
 		USkeletalMeshComponent* Body = BodyMesh.Get();
@@ -940,12 +942,12 @@ void UMRLabBehaviorComponent::WriteTrace(float Speaking)
 	FString Line = FString::Printf(TEXT("{\"t\":%.3f,\"speaking\":%.3f,\"playhead\":%lld,\"waiting\":%.3f,\"valence\":%.3f,\"arousal\":%.3f,\"rapport\":%.3f,\"mood\":%d,"),
 		Now - TraceStart, Speaking, Live ? Live->VoicePlayhead() : 0LL, Live ? Live->VoiceWaiting() : 0.f, Valence, Arousal, Rapport, CurrentMood);
 	Line += FString::Printf(TEXT("\"turn\":\"%s\",\"vlevel\":%.4f,\"gaze\":\"%s\",\"tracked\":%d,\"vdist\":%.0f,\"vangle\":%.2f,\"eyes\":[[%.2f,%.2f],[%.2f,%.2f]],")
-		TEXT("\"curves\":[[%.3f,%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f,%.3f]],\"shift\":[%.3f,%.1f],\"blink\":%.3f,\"mblink\":%.3f,\"head\":[%.1f,%.1f,%.1f],\"eyeerr\":[%.2f,%.2f],\"blinks\":[%d,%d],\"shown\":{"),
+		TEXT("\"curves\":[[%.3f,%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f,%.3f]],\"shift\":[%.3f,%.1f],\"blink\":%.3f,\"mblink\":%.3f,\"bshown\":%.3f,\"head\":[%.1f,%.1f,%.1f],\"eyeerr\":[%.2f,%.2f],\"blinks\":[%d,%d,%d],\"shown\":{"),
 		MRLabTurnName(Turns.State), Live ? Live->VisitorLevel : 0.f, GazeKindName(Gaze.Kind), bTraceTracked ? 1 : 0, TraceVisitorDistance, TraceVisitorAngle,
 		Gaze.YawPitch[0][0], Gaze.YawPitch[0][1], Gaze.YawPitch[1][0], Gaze.YawPitch[1][1],
 		Gaze.Curves[0][0], Gaze.Curves[0][1], Gaze.Curves[0][2], Gaze.Curves[0][3], Gaze.Curves[1][0], Gaze.Curves[1][1], Gaze.Curves[1][2], Gaze.Curves[1][3],
-		Gaze.LastShiftAt - TraceStart, Gaze.LastShiftDegrees, Blinks.Value, TraceModelBlink, Gaze.HeadTarget.X, Gaze.HeadTarget.Y, Gaze.HeadTarget.Z,
-		TraceEyeError[0], TraceEyeError[1], Blinks.OwnCount, Blinks.ModelCount);
+		Gaze.LastShiftAt - TraceStart, Gaze.LastShiftDegrees, Blinks.Own, TraceModelBlink, Blinks.Value, Gaze.HeadTarget.X, Gaze.HeadTarget.Y, Gaze.HeadTarget.Z,
+		TraceEyeError[0], TraceEyeError[1], Blinks.OwnCount, Blinks.ModelCount, Blinks.DroppedCount);
 	// The jaw as the face gets it (lip sync plus the expression layer, README 4.11).
 	static const FName JawOpen(TEXT("CTRL_expressions_jawOpen"));
 	float LayerJaw = 0.f;

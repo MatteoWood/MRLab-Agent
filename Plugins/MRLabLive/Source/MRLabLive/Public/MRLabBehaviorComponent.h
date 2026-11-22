@@ -43,10 +43,8 @@ public:
 
 	/** The face controls the expression layer adds now, already weighted for speaking. Game thread (MRLab Face node). */
 	const TArray<TPair<FName, float>>& GetFaceCurves() const { return FaceCurves; }
-	/** Face controls that replace the lip sync's: the eye look curves (and held test controls). */
+	/** Face controls that replace the lip sync's: the eye look curves and the blinks (or held test controls). */
 	const TArray<TPair<FName, float>>& GetOverrideCurves() const { return OverrideCurves; }
-	/** Blink controls; the node takes the larger of these and the lip sync's. */
-	const TArray<TPair<FName, float>>& GetBlinkCurves() const { return BlinkCurves; }
 
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -173,7 +171,6 @@ private:
 	double NextPartSearch = 0.0;
 	TMap<FName, float> PreviewControls;
 	TArray<TPair<FName, float>> OverrideCurves;
-	TArray<TPair<FName, float>> BlinkCurves;
 	FName NoticeCategory;     // shown when the visitor speaks after a pause while he looks around
 	// Interrupted (D113): the visitor's clip-on microphone is louder than InterruptLevel for InterruptMinSpeech s
 	// (dips shorter than InterruptQuietGap belong to it), starting while Frank speaks, at least InterruptInto s into

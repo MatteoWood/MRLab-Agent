@@ -102,24 +102,22 @@
   "interrupted": { "_about": "Interrupted (owner, D110, D112, D113): the visitor's clip-on microphone is above level (RMS) for min_speech s (dips shorter than quiet_gap s belong to it), starting while his voice is heard, at least into s into his turn: his voice stops at the end of the word being heard, a short surprise and the head tilting back by head_back_degrees (6 until 2026-11-18, owner: slightly less), then the then face after then_after s; the eyes stay on the visitor for look_seconds s; at most once in cooldown s. Not when he is nearly done (his newest words end his turn, turn_final and a sentence end, and are heard within finished_within s): then he finishes. level must sit above Frank's own voice in that microphone (set it in the lab).", "category": "interrupted", "value": 0.7, "then": "interested", "then_value": 0.35, "then_after": 0.6, "head_back_degrees": 4, "level": 0.05, "min_speech": 0.1, "quiet_gap": 0.3, "into": 0.3, "finished_within": 1.5, "cooldown": 5, "look_seconds": 2.5 },
   "notice": { "_about": "When the visitor speaks after a pause (or no conversation) while Frank looks around: a small brow raise as he looks back (owner, D107).", "category": "noticing", "value": 0.6 },
   "turns": {
-    "_about": "Who speaks, for gaze and blinks (README 4.10). Frank's voice from the lip sync's mouth weight; the visitor from the loudness of the audio sent (microphone or test input), counted only after Frank has been silent echo_guard_seconds (no echo cancellation, Q24). Frank's turn ends after frank_end_quick of silence once the words Decisions marked turn_final were heard, else after frank_end_seconds: pauses inside his answers reach 1.7 s (replay, 2026-11-17).",
+    "_about": "Who speaks, for gaze and blinks (README 4.10). Frank's voice from the lip sync's mouth weight; the visitor from the loudness of the audio sent (microphone or test input), counted only after Frank has been silent echo_guard_seconds (no echo cancellation, Q24). Frank's turn ends after frank_end_quick of silence once the words Decisions marked turn_final were heard, else after frank_end_seconds: pauses inside his answers reach 1.7 s (replay, 2026-11-17). A conversation starts when the visitor speaks and ends when they stay silent disengage_seconds after his last words (owner, D124); waiting yield_max_seconds for his answer becomes a pause, which ends the conversation after conversation_seconds of silence.",
     "frank_voice_weight": 0.3, "visitor_threshold": 0.02, "echo_guard_seconds": 0.4, "min_visitor_speech": 0.15,
     "visitor_end_seconds": 0.7, "visitor_end_quick": 0.25, "frank_end_seconds": 2.0, "frank_end_quick": 0.2,
-    "phrase_pause_seconds": 0.35, "yield_max_seconds": 5.0, "conversation_seconds": 15.0
+    "phrase_pause_seconds": 0.35, "yield_max_seconds": 5.0, "disengage_seconds": 5.0, "conversation_seconds": 15.0
   },
   "gaze": {
-    "_about": "Where Frank looks (README 4.10, D90, D104 to D107). Looking around: his attention drifts on a smooth random path (wander_*: degrees from straight ahead, a new goal every wander_every s, wander_step from the last, eased over wander_seconds, never resting), the eyes jump around it (eye_hop_every, hop_spread, a little ahead), the head follows wander_head_yaw_share of it sideways; the head takes head_down_share of any look down and head_up_share of a look up, the eyes the rest; eye movements take eye_shift_base + eye_shift_per_degree seconds, eased in and out; the head starts head_delay s after the eyes and is 95 % there after head_seconds. eye_degrees: measured eye rotation per eye look curve at 0.25, 0.5, 0.75, 1.0 (+ right / up), and each eye's rest direction, in the head bone's frame.",
+    "_about": "Where Frank looks (README 4.10, D90, D104 to D107, D124). Only in a conversation the visitor started by speaking; on the visitor whenever they speak. Looking around (his eyes stay avoid_degrees from the visitor's face, the drift's goals twice that): his attention drifts on a smooth random path (wander_*: degrees from straight ahead, a new goal every wander_every s, wander_step from the last, eased over wander_seconds, never resting), the eyes jump around it (eye_hop_every, hop_spread, a little ahead), the head follows wander_head_yaw_share of it sideways; the head takes head_down_share of any look down and head_up_share of a look up, the eyes the rest; eye movements take eye_shift_base + eye_shift_per_degree seconds, eased in and out; the head starts head_delay s after the eyes and is 95 % there after head_seconds. eye_degrees: measured eye rotation per eye look curve at 0.25, 0.5, 0.75, 1.0 (+ right / up), and each eye's rest direction, in the head bone's frame.",
     "wander_yaw": [-35, 35], "wander_pitch": [-18, 12], "wander_step": [6, 18], "wander_every": [1.5, 4.0], "wander_seconds": 2.5,
     "wander_center_pull": 0.2, "far_chance": 0.15, "wander_distance": 400, "eye_hop_every": [0.3, 0.9], "hop_spread": [1, 5],
     "wander_head_yaw_share": 0.5, "head_down_share": 0.35, "head_up_share": 0.7,
     "eye_shift_base": 0.12, "eye_shift_per_degree": 0.008,
     "jitter_every": [0.8, 2.5], "jitter_degrees": [0.5, 2.0],
-    "fallback_point": [300, 0, 172],
-    "glance_interval": [8, 20], "glance_length": [0.5, 2], "notice_delay": [0.2, 0.5],
-    "close_distance": 460, "fast_speed": 50,
-    "listen_aversion_every": 7.0, "listen_aversion_length": 1.1, "speak_aversion_every": 4.8, "speak_aversion_length": 2.0,
+    "fallback_point": [300, 0, 172], "avoid_degrees": 8,
+    "speak_aversion_every": 4.8, "speak_aversion_length": 2.0,
     "aversion_degrees": [8, 15], "phrase_start_avert": 0.5, "phrase_avert_length": [1, 2], "min_aversion": 1.0, "continue_seconds": 1.5,
-    "think_delay": 0.6, "think_yaw": [10, 18], "think_pitch": [4, 10], "visitor_delay": [0.2, 0.5], "visitor_shift_factor": 1.6, "think_after_voice": [0.3, 1.3], "yield_hold": [3, 5],
+    "think_delay": 0.6, "think_yaw": [10, 18], "think_pitch": [4, 10], "visitor_delay": [0.2, 0.5], "visitor_shift_factor": 1.6, "think_after_voice": [0.3, 1.3],
     "pause_glance_every": [3, 6], "pause_glance_length": [0.5, 1.5], "scan_every": [0.5, 2],
     "head_join_degrees": 20, "head_delay": 0.12, "head_seconds": 1.8,
     "eye_degrees": {
@@ -129,10 +127,10 @@
     }
   },
   "blinks": {
-    "_about": "Frank's own blinks on top of the lip sync model's (README 4.10): per minute at rest and speaking, x (1 + arousal_gain x arousal); with gaze shifts above shift_degrees; a long blink as 'understood' after a visitor turn; never within model_guard seconds of another blink.",
+    "_about": "Frank's own blinks on top of the lip sync model's (README 4.10): per minute at rest and speaking, x (1 + arousal_gain x arousal); with gaze shifts above shift_degrees; a long blink as 'understood' after a visitor turn; no blink starts within min_gap seconds of the last one, own or the model's (a model blink that would is left out, D125).",
     "rest_per_minute": 17, "speaking_per_minute": 26, "min_interval": 1.0,
     "close_seconds": 0.07, "open_seconds": 0.18, "long_closed": [0.4, 0.6],
     "shift_degrees": 25, "shift_probability": 0.5, "understood_probability": 0.3, "understood_min_turn": 2.0,
-    "model_guard": 0.4, "wait_for_pause": 0.5, "arousal_gain": 0.3
+    "min_gap": 1.0, "wait_for_pause": 0.5, "arousal_gain": 0.3
   }
 }

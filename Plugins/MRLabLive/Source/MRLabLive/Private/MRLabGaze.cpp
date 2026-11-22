@@ -83,6 +83,7 @@ void FMRLabTurns::Load(const TSharedPtr<FJsonObject>& Object)
 	FrankEndQuick = Num(Object, TEXT("frank_end_quick"), FrankEndQuick);
 	PhrasePauseSeconds = Num(Object, TEXT("phrase_pause_seconds"), PhrasePauseSeconds);
 	YieldMaxSeconds = Num(Object, TEXT("yield_max_seconds"), YieldMaxSeconds);
+	DisengageSeconds = Num(Object, TEXT("disengage_seconds"), DisengageSeconds);
 	ConversationSeconds = Num(Object, TEXT("conversation_seconds"), ConversationSeconds);
 }
 
@@ -159,10 +160,16 @@ void FMRLabTurns::Update(double Now, float Speaking, float VisitorLevel, double 
 		break;
 	}
 	case EMRLabTurn::VisitorYielding:
-	case EMRLabTurn::FrankYielding:
 		if (Now - StateSince > YieldMaxSeconds)
 		{
 			Enter(EMRLabTurn::Pause, Now);
+		}
+		break;
+	case EMRLabTurn::FrankYielding:
+		// The visitor silent a while after his last words: the conversation is over (owner, D124).
+		if (Now - FrankLastVoice >= DisengageSeconds)
+		{
+			Enter(EMRLabTurn::Outside, Now);
 		}
 		break;
 	default:
@@ -244,17 +251,11 @@ void FMRLabGaze::Load(const TSharedPtr<FJsonObject>& Object)
 	EyeHopEvery = Range(Object, TEXT("eye_hop_every"), EyeHopEvery);
 	JitterEvery = Range(Object, TEXT("jitter_every"), JitterEvery);
 	JitterDegrees = Range(Object, TEXT("jitter_degrees"), JitterDegrees);
+	AvoidDegrees = Num(Object, TEXT("avoid_degrees"), AvoidDegrees);
 	if (Object->TryGetArrayField(TEXT("fallback_point"), List) && List->Num() == 3)
 	{
 		FallbackPoint = FVector((*List)[0]->AsNumber(), (*List)[1]->AsNumber(), (*List)[2]->AsNumber());
 	}
-	GlanceInterval = Range(Object, TEXT("glance_interval"), GlanceInterval);
-	GlanceLength = Range(Object, TEXT("glance_length"), GlanceLength);
-	NoticeDelay = Range(Object, TEXT("notice_delay"), NoticeDelay);
-	CloseDistance = Num(Object, TEXT("close_distance"), CloseDistance);
-	FastSpeed = Num(Object, TEXT("fast_speed"), FastSpeed);
-	ListenAversionEvery = Num(Object, TEXT("listen_aversion_every"), ListenAversionEvery);
-	ListenAversionLength = Num(Object, TEXT("listen_aversion_length"), ListenAversionLength);
 	SpeakAversionEvery = Num(Object, TEXT("speak_aversion_every"), SpeakAversionEvery);
 	SpeakAversionLength = Num(Object, TEXT("speak_aversion_length"), SpeakAversionLength);
 	AversionDegrees = Range(Object, TEXT("aversion_degrees"), AversionDegrees);
@@ -268,7 +269,6 @@ void FMRLabGaze::Load(const TSharedPtr<FJsonObject>& Object)
 	VisitorDelay = Range(Object, TEXT("visitor_delay"), VisitorDelay);
 	VisitorShiftFactor = Num(Object, TEXT("visitor_shift_factor"), VisitorShiftFactor);
 	ThinkAfterVoice = Range(Object, TEXT("think_after_voice"), ThinkAfterVoice);
-	YieldHold = Range(Object, TEXT("yield_hold"), YieldHold);
 	PauseGlanceEvery = Range(Object, TEXT("pause_glance_every"), PauseGlanceEvery);
 	PauseGlanceLength = Range(Object, TEXT("pause_glance_length"), PauseGlanceLength);
 	ScanEvery = Range(Object, TEXT("scan_every"), ScanEvery);
@@ -419,18 +419,6 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 	const FMRLabTurns& T = *In.Turns;
 	const double Now = In.Now;
 	const FVector Mid = (In.EyeL + In.EyeR) * 0.5;
-
-	if (In.bTracked)
-	{
-		if (bWasTracked && In.DeltaTime > 0.f)
-		{
-			const float Speed = (In.Visitor - LastVisitor).Size() / In.DeltaTime;
-			VisitorSpeed += (Speed - VisitorSpeed) * FMath::Min(1.f, In.DeltaTime / 0.25f);
-		}
-		LastVisitor = In.Visitor;
-	}
-	const bool bArrived = In.bTracked && !bWasTracked;
-	bWasTracked = In.bTracked;
 	const FVector Visitor = VisitorPoint(In);
 
 	if (!bStarted)
@@ -441,7 +429,6 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		HeadAnchor = GazePoint;
 		HeadTarget = GazePoint;
 		ChooseOwn(In);
-		NextGlance = Now + Rand(GlanceInterval);
 	}
 	const bool bTurnChanged = T.State != LastTurn;
 	if (bTurnChanged && LastTurn == EMRLabTurn::Speaking)
@@ -477,70 +464,24 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 	else switch (T.State)
 	{
 	case EMRLabTurn::Outside:
-		if (bTurnChanged)
-		{
-			ChooseOwn(In);
-			NextGlance = Now + Rand(GlanceInterval);
-		}
-		if (bArrived)
-		{
-			NoticeAt = Now + Rand(NoticeDelay);
-		}
-		{
-			// Someone is assumed in front even without tracking (owner, 2026-11-18): then at the fallback point.
-			const bool bAlert = (Visitor - Mid).Size() < CloseDistance || VisitorSpeed > FastSpeed;
-			if ((NoticeAt > 0.0 && Now >= NoticeAt) || (Kind != EKind::Glance && Now >= NextGlance))
-			{
-				NoticeAt = -1.0;
-				OnVisitor(EKind::Glance, Now + Rand(GlanceLength));
-				NextGlance = Until + Rand(GlanceInterval) * (bAlert ? 0.5f : 1.f);
-				break;
-			}
-		}
-		if (Now >= Until)
+		// No conversation: he keeps to himself and does not look at the visitor until they speak (owner, D124).
+		if (Kind != EKind::Own)
 		{
 			ChooseOwn(In);
 		}
 		break;
 
 	case EMRLabTurn::Listening:
-		if (bTurnChanged)
+		// While the visitor speaks he looks at them, no aversions (owner, D124). He hears them, then turns to them
+		// without rushing.
+		if (bTurnChanged && Kind != EKind::Visitor)
 		{
-			if (Kind != EKind::Visitor)
-			{
-				ReturnAt = Now + Rand(VisitorDelay); // he hears them, then turns to them without rushing
-			}
-			NextAversion = Now + Waiting(ListenAversionEvery * (1.f + In.Rapport), 1.f);
+			ReturnAt = Now + Rand(VisitorDelay);
 		}
-		if (ReturnAt > 0.0)
+		if (ReturnAt > 0.0 && Now >= ReturnAt)
 		{
-			if (Now >= ReturnAt)
-			{
-				ReturnAt = -1.0;
-				OnVisitor(EKind::Visitor, Forever);
-			}
-			break;
-		}
-		if (Kind == EKind::Aversion)
-		{
-			if (Now >= Until)
-			{
-				OnVisitor(EKind::Visitor, Forever);
-			}
-		}
-		else if (Now >= NextAversion)
-		{
-			// Vetoes: not in the first second of their turn, not in a silence that may end it; a vetoed aversion
-			// is tried again shortly.
-			if (Now - T.VisitorTurnStart >= 1.0 && Now - T.VisitorLastVoice < 0.25)
-			{
-				Avert(FMath::Clamp(ListenAversionLength + 0.3f * FMath::FRandRange(-1.f, 1.f), 0.6f, 2.f));
-				NextAversion = Now + Waiting(ListenAversionEvery * (1.f + In.Rapport), 1.f);
-			}
-			else
-			{
-				NextAversion = Now + 0.3;
-			}
+			ReturnAt = -1.0;
+			OnVisitor(EKind::Visitor, Forever);
 		}
 		break;
 
@@ -624,13 +565,10 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 		break;
 
 	case EMRLabTurn::FrankYielding:
-		if (bTurnChanged)
+		// Waiting for an answer: on the visitor until they speak or the conversation ends (owner, D124).
+		if (Kind != EKind::Visitor)
 		{
-			OnVisitor(EKind::Visitor, Now + Rand(YieldHold));
-		}
-		if (Now >= Until)
-		{
-			ChooseOwn(In); // the glance away after waiting for an answer; the pause takes over
+			OnVisitor(EKind::Visitor, Forever);
 		}
 		break;
 
@@ -720,6 +658,20 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 			}
 			GoalYaw = FMath::Clamp(GoalYaw, WanderYaw.X, WanderYaw.Y);
 			GoalPitch = FMath::Clamp(GoalPitch, WanderPitch.X, WanderPitch.Y);
+			// The goals keep twice AvoidDegrees from the visitor (moved aside), so the eyes do not hover at the edge
+			// of the face (D124).
+			const FRotator ToVisitor = (Visitor - Mid).Rotation();
+			const float VisitorYaw = FMath::FindDeltaAngleDegrees(In.FrankForward.Rotation().Yaw, ToVisitor.Yaw);
+			const float Keep = 2.f * AvoidDegrees;
+			if (FMath::Abs(GoalYaw - VisitorYaw) < Keep && FMath::Abs(GoalPitch - ToVisitor.Pitch) < Keep)
+			{
+				float Side = GoalYaw >= VisitorYaw ? 1.f : -1.f;
+				if (VisitorYaw + Side * Keep > WanderYaw.Y || VisitorYaw + Side * Keep < WanderYaw.X)
+				{
+					Side = -Side;
+				}
+				GoalYaw = FMath::Clamp(VisitorYaw + Side * Keep, WanderYaw.X, WanderYaw.Y);
+			}
 		}
 		Spring2(AttnYawA, AttnYawVelA, AttnYaw, AttnYawVel, GoalYaw, WanderSeconds, In.DeltaTime);
 		Spring2(AttnPitchA, AttnPitchVelA, AttnPitch, AttnPitchVel, GoalPitch, WanderSeconds, In.DeltaTime);
@@ -734,7 +686,17 @@ void FMRLabGaze::Update(const FMRLabGazeInput& In)
 			const float Angle = FMath::FRandRange(0.f, 2.f * PI);
 			const FRotator Look(AttnPitch + AttnPitchVel * Lead + 0.6f * Spread * FMath::Sin(Angle),
 				ForwardYaw + AttnYaw + AttnYawVel * Lead + Spread * FMath::Cos(Angle), 0.f);
-			StartSaccade(In, Mid + Look.Vector() * WanderDistance);
+			// The eyes never land on the visitor's face while he looks around (owner, D124): a fixation closer than
+			// AvoidDegrees is pushed out to that distance.
+			FVector Hop = Look.Vector();
+			const FVector ToVisitor = (Visitor - Mid).GetSafeNormal();
+			if (FVector::DotProduct(Hop, ToVisitor) > FMath::Cos(FMath::DegreesToRadians(AvoidDegrees)))
+			{
+				FVector Axis = FVector::CrossProduct(ToVisitor, Hop);
+				Axis = Axis.SizeSquared() > 1e-8 ? Axis.GetSafeNormal() : FVector::UpVector;
+				Hop = FQuat(Axis, FMath::DegreesToRadians(AvoidDegrees)).RotateVector(ToVisitor);
+			}
+			StartSaccade(In, Mid + Hop * WanderDistance);
 		}
 	}
 	else if (Now >= NextJitter && Now - SaccadeStart > SaccadeSeconds)
@@ -835,7 +797,7 @@ void FMRLabBlinks::Load(const TSharedPtr<FJsonObject>& Object)
 	ShiftProbability = Num(Object, TEXT("shift_probability"), ShiftProbability);
 	UnderstoodProbability = Num(Object, TEXT("understood_probability"), UnderstoodProbability);
 	UnderstoodMinTurn = Num(Object, TEXT("understood_min_turn"), UnderstoodMinTurn);
-	ModelGuard = Num(Object, TEXT("model_guard"), ModelGuard);
+	MinGap = Num(Object, TEXT("min_gap"), MinGap);
 	WaitForPause = Num(Object, TEXT("wait_for_pause"), WaitForPause);
 	ArousalGain = Num(Object, TEXT("arousal_gain"), ArousalGain);
 }
@@ -863,21 +825,30 @@ void FMRLabBlinks::Update(double Now, const FMRLabTurns& Turns, const FMRLabGaze
 		Schedule(Now, PerMinute);
 	}
 
-	// The lip sync model's own blinks count as blinks.
-	if (ModelBlink > 0.5f && !bModelBlinking)
+	// The lip sync model's own blinks count as blinks; one that starts within MinGap of the last blink is left out
+	// (two blinks in quick succession, owner 2026-11-22, D125). Caught as it starts to close, so it is left out whole.
+	if (!bModelBlinking && ModelBlink > 0.1f)
 	{
 		bModelBlinking = true;
-		++ModelCount;
-		LastBlink = Now;
-		Schedule(Now, PerMinute);
+		bModelShown = Now - LastBlink >= MinGap;
+		if (bModelShown)
+		{
+			++ModelCount;
+			LastBlink = Now;
+			Schedule(Now, PerMinute);
+		}
+		else
+		{
+			++DroppedCount;
+		}
 	}
-	else if (ModelBlink < 0.3f)
+	else if (bModelBlinking && ModelBlink < 0.05f)
 	{
 		bModelBlinking = false;
 	}
 
 	const bool bBusy = Now - BlinkStart < CloseSeconds + BlinkClosed + OpenSeconds || bModelBlinking;
-	const bool bClear = !bBusy && Now - LastBlink >= ModelGuard;
+	const bool bClear = !bBusy && Now - LastBlink >= MinGap;
 
 	if (Gaze.LastShiftAt > HandledShift)
 	{
@@ -907,7 +878,7 @@ void FMRLabBlinks::Update(double Now, const FMRLabTurns& Turns, const FMRLabGaze
 		// While he speaks, a blink waits a little for a pause in his voice.
 		if (!Turns.bFrankVoice || Now - DueSince >= WaitForPause)
 		{
-			if (Now - LastBlink >= ModelGuard)
+			if (Now - LastBlink >= MinGap)
 			{
 				Start(Now, 0.f);
 			}
@@ -918,18 +889,19 @@ void FMRLabBlinks::Update(double Now, const FMRLabTurns& Turns, const FMRLabGaze
 	const double T = Now - BlinkStart;
 	if (T < CloseSeconds)
 	{
-		Value = FMath::SmoothStep(0.f, 1.f, float(T / CloseSeconds));
+		Own = FMath::SmoothStep(0.f, 1.f, float(T / CloseSeconds));
 	}
 	else if (T < CloseSeconds + BlinkClosed)
 	{
-		Value = 1.f;
+		Own = 1.f;
 	}
 	else if (T < CloseSeconds + BlinkClosed + OpenSeconds)
 	{
-		Value = 1.f - FMath::SmoothStep(0.f, 1.f, float((T - CloseSeconds - BlinkClosed) / OpenSeconds));
+		Own = 1.f - FMath::SmoothStep(0.f, 1.f, float((T - CloseSeconds - BlinkClosed) / OpenSeconds));
 	}
 	else
 	{
-		Value = 0.f;
+		Own = 0.f;
 	}
+	Value = FMath::Max(Own, bModelBlinking && bModelShown ? ModelBlink : 0.f);
 }

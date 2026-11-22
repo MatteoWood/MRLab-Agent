@@ -8,12 +8,12 @@
 /** Who speaks, as far as gaze and blinks need it (the reflex layer's conversation states; 9D/9E add the rest). */
 enum class EMRLabTurn : uint8
 {
-	Outside,         // no conversation (nobody spoke for a while)
+	Outside,         // no conversation: until the visitor speaks, or the visitor silent a while after Frank's last words
 	Listening,       // the visitor speaks
 	VisitorYielding, // the visitor's turn ended, Frank has not started
 	Speaking,        // Frank's voice is heard
 	FrankYielding,   // Frank's turn ended, the visitor has not started
-	Pause,           // a conversation, both silent after the yielding phase
+	Pause,           // the visitor's turn ended and no answer came for a while
 };
 
 const TCHAR* MRLabTurnName(EMRLabTurn Turn);
@@ -30,8 +30,9 @@ struct FMRLabTurns
 	float FrankEndSeconds = 0.6f;     // silence that ends Frank's turn
 	float FrankEndQuick = 0.2f;       // ... or this silence after turn_final
 	float PhrasePauseSeconds = 0.25f; // his voice after at least this pause starts a phrase
-	float YieldMaxSeconds = 5.f;      // a yielding phase becomes a pause after this
-	float ConversationSeconds = 15.f; // a conversation ends after this much silence
+	float YieldMaxSeconds = 5.f;      // waiting this long for Frank's answer becomes a pause
+	float DisengageSeconds = 5.f;     // the visitor silent this long after Frank's last words: the conversation ends (D124)
+	float ConversationSeconds = 15.f; // a pause ends the conversation after this much silence
 
 	void Load(const TSharedPtr<FJsonObject>& Object);
 	/** Advance by one tick. TurnDoneAt / TurnFinalAt: times of the latest Decisions saying the visitor's / Frank's
@@ -77,8 +78,6 @@ struct FMRLabGazeInput
 	bool bTracked = false;
 	FVector Visitor = FVector::ZeroVector;       // tracked head point, world (valid when tracked)
 	const FMRLabTurns* Turns = nullptr;
-	float Arousal = 0.f;
-	float Rapport = 0.f;
 };
 
 struct FMRLabGaze
@@ -104,13 +103,7 @@ struct FMRLabGaze
 	float EyeShiftPerDegree = 0.006f;
 	FVector2D JitterEvery = { 0.8f, 2.5f };    // small eye movements while he holds an aversion or a thought
 	FVector2D JitterDegrees = { 0.5f, 2.f };
-	FVector2D GlanceInterval = { 8.f, 20.f };
-	FVector2D GlanceLength = { 0.5f, 2.f };
-	FVector2D NoticeDelay = { 0.2f, 0.5f };
-	float CloseDistance = 460.f;     // cm from Frank's eyes; closer (or moving fast) halves the glance interval
-	float FastSpeed = 50.f;          // cm/s
-	float ListenAversionEvery = 7.f; // mean seconds, x (1 + rapport)
-	float ListenAversionLength = 1.1f;
+	float AvoidDegrees = 8.f;        // while he looks around his eyes stay this far from the visitor's face (D124)
 	float SpeakAversionEvery = 4.8f;
 	float SpeakAversionLength = 2.f;
 	FVector2D AversionDegrees = { 8.f, 15.f };
@@ -124,7 +117,6 @@ struct FMRLabGaze
 	FVector2D VisitorDelay = { 0.2f, 0.5f };   // when the visitor starts speaking he turns to them after this
 	float VisitorShiftFactor = 1.6f;           // ... and his eyes take this much longer than for other shifts
 	FVector2D ThinkAfterVoice = { 0.3f, 1.3f };
-	FVector2D YieldHold = { 3.f, 5.f };
 	FVector2D PauseGlanceEvery = { 3.f, 6.f };
 	FVector2D PauseGlanceLength = { 0.5f, 1.5f };
 	FVector2D ScanEvery = { 0.5f, 2.f };
@@ -142,8 +134,10 @@ struct FMRLabGaze
 	{
 		HeadBackStart = Now;
 		HeadBackDegrees = Degrees;
-		HoldVisitorUntil = Now + HoldSeconds;
+		HoldVisitor(Now + HoldSeconds);
 	}
+	/** On the visitor until this time, whatever the state (no aversions). */
+	void HoldVisitor(double HoldUntil) { HoldVisitorUntil = FMath::Max(HoldVisitorUntil, HoldUntil); }
 
 	// Output.
 	float Curves[2][4] = {};         // per eye: look right, left, up, down
@@ -164,13 +158,11 @@ private:
 	void ChooseOwn(const FMRLabGazeInput& In);
 
 	bool bStarted = false;
-	bool bWasTracked = false;
 	EMRLabTurn LastTurn = EMRLabTurn::Outside;
 	double Until = 0.0;              // end of the current fixation (own, glance, aversion)
 	double NextAversion = 0.0;
 	double NextGlance = 0.0;
 	double NextScan = 0.0;
-	double NoticeAt = -1.0;
 	double ThinkUntil = -1.0;
 	double ReturnAt = -1.0;          // the visitor spoke: turn to them at this time
 	double HeadBackStart = -1e9;
@@ -207,8 +199,6 @@ private:
 	double HeadMoveAt = -1e9;
 	FVector PendingAnchor = FVector::ZeroVector;
 	bool bPendingFollowsVisitor = false;
-	FVector LastVisitor = FVector::ZeroVector;
-	float VisitorSpeed = 0.f;
 };
 
 struct FMRLabBlinks
@@ -224,7 +214,7 @@ struct FMRLabBlinks
 	float ShiftProbability = 0.5f;
 	float UnderstoodProbability = 0.3f;
 	float UnderstoodMinTurn = 2.f;
-	float ModelGuard = 0.4f;
+	float MinGap = 1.f;    // no blink starts within this many seconds of the last one, own or the model's (D125)
 	float WaitForPause = 0.5f;
 	float ArousalGain = 0.3f;
 
@@ -232,12 +222,15 @@ struct FMRLabBlinks
 	/** ModelBlink: the lip sync model's own blink value now (max of both eyes). */
 	void Update(double Now, const FMRLabTurns& Turns, const FMRLabGaze& Gaze, float ModelBlink, float Arousal);
 
-	float Value = 0.f;     // own blink, both eyes
+	float Own = 0.f;       // own blink, both eyes
+	float Value = 0.f;     // shown: the own blink or a model blink that is not too soon after the last one
 	int32 OwnCount = 0;
 	int32 ModelCount = 0;
+	int32 DroppedCount = 0; // model blinks left out (too soon)
 	bool bModelBlinking = false;
 
 private:
+	bool bModelShown = false;
 	void Start(double Now, float Closed);
 	void Schedule(double Now, float PerMinute);
 
