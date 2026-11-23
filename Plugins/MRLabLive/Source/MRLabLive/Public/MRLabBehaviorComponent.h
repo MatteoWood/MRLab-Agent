@@ -172,9 +172,10 @@ private:
 	TMap<FName, float> PreviewControls;
 	TArray<TPair<FName, float>> OverrideCurves;
 	FName NoticeCategory;     // shown when the visitor speaks after a pause while he looks around
-	// Interrupted (D113): the visitor's clip-on microphone is louder than InterruptLevel for InterruptMinSpeech s
-	// (dips shorter than InterruptQuietGap belong to it), starting while Frank speaks, at least InterruptInto s into
-	// his turn; unless he is nearly done (his newest words end his turn and are heard within FinishedWithin s).
+	// Interrupted (D113, D126): the visitor's clip-on microphone is louder than InterruptLevel for InterruptMinSpeech s
+	// (dips shorter than InterruptQuietGap belong to it), starting while Frank speaks: his voice stops at a word end.
+	// The surprise only at least InterruptInto s into his turn and unless he is nearly done (his newest words end his
+	// turn and are heard within FinishedWithin s).
 	FName InterruptCategory;
 	float InterruptValue = 0.f;
 	FName ListenCategory;     // ... then this face after ListenAfter seconds
@@ -189,6 +190,10 @@ private:
 	double LoudSince = -1.0;        // start of the visitor's current loud stretch, -1 when quiet
 	double LastLoud = -1e9;
 	double HandledOnset = -1.0;     // the loud stretch already judged
+	// Silent while the visitor speaks (owner, D126): his voice that has not started waits until the clip-on microphone
+	// has been below InterruptLevel for HoldResume s.
+	float HoldResume = 0.7f;
+	bool bHoldingVoice = false;
 	float InterruptCooldown = 5.f;
 	float InterruptLookSeconds = 2.5f; // eyes on the visitor this long, no aversions
 	bool bLastFrankFinished = true; // his latest words: turn_final and a sentence end

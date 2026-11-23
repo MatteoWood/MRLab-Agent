@@ -86,7 +86,7 @@ private:
 };
 
 /**
- * Spoken conversation with OpenAI gpt-live-1 through the Live API (WebSocket over WinHttp, Windows only).
+ * Spoken conversation with OpenAI gpt-live-1.1 through the Live API (WebSocket over WinHttp, Windows only).
  * Streams the default microphone to the model and plays the agent's voice from the owning actor.
  * The API key is read from Saved/OpenAIKey.txt (one line, not in Git).
  * At session start, every .md file in Saved/Knowledge is appended to the instructions as lab knowledge.
@@ -108,7 +108,7 @@ public:
 	UMRLabLiveSession();
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MRLab Live")
-	FString Model = TEXT("gpt-live-1");
+	FString Model = TEXT("gpt-live-1.1");
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MRLab Live")
 	FString Voice = TEXT("marin");
@@ -150,6 +150,11 @@ public:
 	/** The visitor talks over Frank (D113): his voice stops at the end of the word being heard (at most 0.5 s on),
 	 * and what the model still says of this answer is not played; his next answer plays again. */
 	void StopAtWordEnd();
+	/** The visitor speaks (owner, D126): while held, Frank's voice that has not started yet waits instead of playing;
+	 * released, it plays, with the stream's silence in it dropped (the model waited for the visitor). */
+	void HoldVoice(bool bHold);
+	/** Seconds of Frank's voice waiting because of HoldVoice. */
+	float VoiceHeld() const { return bVoiceHeld ? PendingVoice.Num() / 24000.f : 0.f; }
 	/** Seconds until the end of his newest words is heard (their text runs ahead of his voice), -1 if unknown. */
 	float FrankWordsLeft() const;
 
@@ -254,7 +259,8 @@ private:
 	int32 AgentAnchorMs = -1;
 	int64 AgentAnchorSample = -1;
 	double LastAgentFragment = 0.0; // FPlatformTime::Seconds() of Frank's latest transcript fragment
-	TArray<int16> PendingVoice; // received this tick, goes into the wave at the next ReleaseVoice
+	TArray<int16> PendingVoice; // received, goes into the wave at the next ReleaseVoice (later while held)
+	bool bVoiceHeld = false;    // HoldVoice: the visitor speaks
 	int64 DroppedSilence = 0; // samples of silence dropped to catch up (D111), logged when done
 	int32 SilentFrames = 0;   // consecutive 10 ms frames of exact silence in the released voice
 	int32 LastAgentEndMs = -1; // end_ms of Frank's newest transcript fragment

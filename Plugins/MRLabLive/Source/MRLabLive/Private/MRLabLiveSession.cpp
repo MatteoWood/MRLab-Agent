@@ -59,10 +59,18 @@ namespace
 	constexpr float MouthOpenPerStep = 0.35f;
 	constexpr float MouthClosePerStep = 0.1f;
 
+	// Frank stays silent while the visitor speaks (owner, D126): no listening sounds over them, and he yields when they
+	// talk over him. Policy headings and the backchannel wording from OpenAI's GPT-Live prompting guide for gpt-live-1.1
+	// (its "None" policy). The plugin also holds back any voice that still comes while the visitor speaks (HoldVoice).
+	const TCHAR* TurnRule = TEXT(
+		"Backchannel policy: Do not produce any backchannel interjections while the user is speaking. Backchanneling is "
+		"entirely disallowed: stay silent until it is your turn to respond.\n\n"
+		"Interruption policy: Stop speaking when the user interrupts. Listen to what they say.");
 	// Delegation cannot be switched off in the session config (omitted means client delegation), so it is ruled out
-	// in the instructions, and any delegation that still happens is answered at once (see HandleMessage).
+	// in the instructions, and any delegation that still happens is answered at once (see HandleMessage). Wording for
+	// gpt-live-1.1 ("Do not delegate"; gpt-live-1 needed "Do not generate <|SpawnThinking|>").
 	const TCHAR* NoDelegationRule = TEXT(
-		"Delegation policy: there is no backend and there are no tools. NEVER GENERATE <|SpawnThinking|>, "
+		"Delegation policy: there is no backend and there are no tools. DO NOT DELEGATE, "
 		"CHECK, SEARCH, LOOK UP OR USE TOOLS. Answer right away from what you know. Facts about the lab come only from "
 		"the lab knowledge below; if it does not contain them, say that you do not know. Never promise to look something up.");
 	const TCHAR* DelegationReply = TEXT(
@@ -84,7 +92,7 @@ namespace
 		"gesture now, and what they did in the last seconds. A person listed as \"Main visitor\" is the one your gaze "
 		"follows, usually the one talking with you; the others are standing nearby. The newest view is what you see "
 		"right now and replaces all "
-		"earlier ones. It is always there, so you never need to look: never generate <|SpawnThinking|> for anything you "
+		"earlier ones. It is always there, so you never need to look: never delegate for anything you "
 		"see. A new view is never a reason to speak: you only ever reply to what the visitor says. When the visitor asks "
 		"about anything visible (how they look, their clothes, what they hold or do, their pose or gestures, how many "
 		"people are there, what you see), answer at once from the newest view, as if you saw it yourself. Never mention "
@@ -551,8 +559,8 @@ void UMRLabLiveSession::StartSession()
 
 	const FString Knowledge = LoadKnowledge();
 	// The session runs without a delegation backend: facts come from the instructions and the lab knowledge, the view
-	// from the camera service (SeeingRule). Delegation wording for gpt-live-1 from OpenAI's GPT-Live prompting guide.
-	const FString FullInstructions = Instructions + TEXT("\n\n") + NoDelegationRule + TEXT("\n\n") + SeeingRule
+	// from the camera service (SeeingRule). Policy order as in OpenAI's GPT-Live prompting guide.
+	const FString FullInstructions = Instructions + TEXT("\n\n") + TurnRule + TEXT("\n\n") + NoDelegationRule + TEXT("\n\n") + SeeingRule
 		+ (Knowledge.IsEmpty() ? FString() : TEXT("\n\nLab knowledge:") + Knowledge);
 
 	// Decisions (README section 5, Step 9): triggers answer fixed questions on every transcript fragment of both sides.
@@ -985,6 +993,10 @@ void UMRLabLiveSession::ReleaseVoice()
 		PendingVoice.Reset();
 		return;
 	}
+	if (bVoiceHeld)
+	{
+		return; // the visitor speaks: his voice waits (D126)
+	}
 	// Catching up (D111, D112). The stream runs in real time: audio that piles up during a stall or a hitch (it comes
 	// as a burst afterwards) would keep him late for the rest of the session. When more than CatchUpHighSamples would
 	// wait in the wave, the stream's exact silence (zeros, in 10 ms frames, after the first 100 ms of a silence, so
@@ -1179,6 +1191,19 @@ bool UMRLabLiveSession::WordEnds(const int16* Frame, int32 Num)
 	CutPeak = FMath::Max(CutPeak, Rms);
 	CutQuietFrames = Rms < FMath::Max(0.006f, 0.2f * CutPeak) ? CutQuietFrames + 1 : 0;
 	return CutQuietFrames >= WordEndQuietFrames;
+}
+
+void UMRLabLiveSession::HoldVoice(bool bHold)
+{
+	if (bHold == bVoiceHeld)
+	{
+		return;
+	}
+	bVoiceHeld = bHold;
+	if (!bHold && PendingVoice.Num() >= LiveSampleRate / 10)
+	{
+		UE_LOG(LogMRLabLive, Log, TEXT("Voice held while the visitor spoke: %.2f s, plays now"), PendingVoice.Num() / float(LiveSampleRate));
+	}
 }
 
 void UMRLabLiveSession::StopAtWordEnd()
@@ -1665,6 +1690,7 @@ void UMRLabLiveSession::Shutdown(const FString& Reason)
 	DroppedSilence = 0;
 	LastAgentEndMs = -1;
 	VoiceCut = EVoiceCut::None;
+	bVoiceHeld = false;
 	MuteFrom = MuteTo = 0;
 	SilencedSamples = 0;
 	bMuteHeld = false;

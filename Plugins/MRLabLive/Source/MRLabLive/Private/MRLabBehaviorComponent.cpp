@@ -251,6 +251,7 @@ bool UMRLabBehaviorComponent::LoadSettings()
 		InterruptMinSpeech = NumberOr(*Object, TEXT("min_speech"), InterruptMinSpeech);
 		InterruptQuietGap = NumberOr(*Object, TEXT("quiet_gap"), InterruptQuietGap);
 		FinishedWithin = NumberOr(*Object, TEXT("finished_within"), FinishedWithin);
+		HoldResume = NumberOr(*Object, TEXT("resume_after"), HoldResume);
 		InterruptCooldown = NumberOr(*Object, TEXT("cooldown"), InterruptCooldown);
 		InterruptLookSeconds = NumberOr(*Object, TEXT("look_seconds"), InterruptLookSeconds);
 		HeadBackDegrees = NumberOr(*Object, TEXT("head_back_degrees"), HeadBackDegrees);
@@ -723,17 +724,23 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 			UE_LOG(LogMRLabBehavior, Log, TEXT("Noticed the visitor after a silence: %s %.2f"), *NoticeCategory.ToString(), NoticeValue);
 		}
 	}
-	// Interrupted (D110, D112, D113). The Live API gives no signal (the model stops by itself 1.2 to 2 s after the
-	// visitor starts). The visitor wears a clip-on microphone: above InterruptLevel the sound is the visitor, below it
-	// Frank's own voice from the speakers or nothing. A loud stretch that started while he speaks and lasted
-	// InterruptMinSpeech s: his voice stops at the end of the word being heard, a short surprise with the head tilting
-	// back a little, then his listening face. Not when he is nearly done (his newest words end his turn and are heard
-	// within FinishedWithin s): then he finishes.
+	// Frank is silent while the visitor speaks (owner, D126) and reacts when they talk over him (D110, D112, D113). The
+	// Live API gives no signal (the model stops by itself 1.2 to 2 s after the visitor starts, and often starts its
+	// answer with "Yeah," or "Oh," while they still speak). The visitor wears a clip-on microphone: above InterruptLevel
+	// the sound is the visitor, below it Frank's own voice from the speakers or nothing.
+	// A loud stretch that starts while he is silent (no voice for a phrase pause): his voice that comes now waits until
+	// the visitor has been quiet HoldResume s, then plays. One that starts while his voice is heard and lasts
+	// InterruptMinSpeech s: his voice stops at the end of the word being heard (the rest of that answer is left out),
+	// and what comes later waits the same way. With the stop, unless he had just started or is nearly done (his newest
+	// words end his turn and are heard within FinishedWithin s), a short surprise with the head tilting back a little,
+	// then his listening face.
 	const float Level = Live ? Live->VisitorLevel : 0.f;
+	const bool bFrankHeard = Turns.bFrankVoice || Now - Turns.FrankLastVoice < Turns.PhrasePauseSeconds;
 	if (Level >= InterruptLevel)
 	{
 		LoudSince = LoudSince < 0.0 ? Now : LoudSince;
 		LastLoud = Now;
+		bHoldingVoice = bHoldingVoice || !bFrankHeard;
 	}
 	else if (LoudSince >= 0.0 && Now - LastLoud > InterruptQuietGap)
 	{
@@ -742,17 +749,22 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 	if (LoudSince >= 0.0 && LoudSince != HandledOnset && Now - LoudSince >= InterruptMinSpeech)
 	{
 		HandledOnset = LoudSince;
-		if (Live && Turns.bFrankVoice && LoudSince - Turns.FrankTurnStart >= InterruptInto && Now - LastInterruptAt > InterruptCooldown)
+		if (Live && bFrankHeard)
 		{
+			Session.Get()->StopAtWordEnd(); // Live is the same session, read-only here
+			bHoldingVoice = true;
 			const float Left = Live->FrankWordsLeft();
-			if (bLastFrankFinished && Left < FinishedWithin)
+			if (!Turns.bFrankVoice || LoudSince - Turns.FrankTurnStart < InterruptInto || Now - LastInterruptAt <= InterruptCooldown)
 			{
-				UE_LOG(LogMRLabBehavior, Log, TEXT("The visitor speaks as he finishes (%.1f s left): he finishes"), Left);
+				UE_LOG(LogMRLabBehavior, Log, TEXT("The visitor speaks: his voice stops at a word end (no surprise: between words, just started or soon after the last one)"));
+			}
+			else if (bLastFrankFinished && Left < FinishedWithin)
+			{
+				UE_LOG(LogMRLabBehavior, Log, TEXT("The visitor speaks as he finishes (%.1f s left): his voice stops at a word end, no surprise"), Left);
 			}
 			else
 			{
 				LastInterruptAt = Now;
-				Session.Get()->StopAtWordEnd(); // Live is the same session, read-only here
 				if (FCategory* Category = FindCategory(InterruptCategory))
 				{
 					Apply(*Category, InterruptValue);
@@ -763,6 +775,14 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 					Level, Now - LoudSince, Left);
 			}
 		}
+	}
+	if (bHoldingVoice && Now - LastLoud >= HoldResume)
+	{
+		bHoldingVoice = false;
+	}
+	if (UMRLabLiveSession* LiveSession = Session.Get())
+	{
+		LiveSession->HoldVoice(bHoldingVoice);
 	}
 	// While the visitor speaks over him he looks at them (owner, D124), also when he goes on to finish.
 	if (LoudSince >= 0.0 && Now - LoudSince >= InterruptMinSpeech && Turns.State == EMRLabTurn::Speaking)
@@ -939,8 +959,8 @@ void UMRLabBehaviorComponent::WriteTrace(float Speaking)
 	}
 	TraceNext += TraceInterval;
 	const UMRLabLiveSession* Live = Session.Get();
-	FString Line = FString::Printf(TEXT("{\"t\":%.3f,\"speaking\":%.3f,\"playhead\":%lld,\"waiting\":%.3f,\"valence\":%.3f,\"arousal\":%.3f,\"rapport\":%.3f,\"mood\":%d,"),
-		Now - TraceStart, Speaking, Live ? Live->VoicePlayhead() : 0LL, Live ? Live->VoiceWaiting() : 0.f, Valence, Arousal, Rapport, CurrentMood);
+	FString Line = FString::Printf(TEXT("{\"t\":%.3f,\"speaking\":%.3f,\"playhead\":%lld,\"waiting\":%.3f,\"held\":%.3f,\"valence\":%.3f,\"arousal\":%.3f,\"rapport\":%.3f,\"mood\":%d,"),
+		Now - TraceStart, Speaking, Live ? Live->VoicePlayhead() : 0LL, Live ? Live->VoiceWaiting() : 0.f, Live ? Live->VoiceHeld() : 0.f, Valence, Arousal, Rapport, CurrentMood);
 	Line += FString::Printf(TEXT("\"turn\":\"%s\",\"vlevel\":%.4f,\"gaze\":\"%s\",\"tracked\":%d,\"vdist\":%.0f,\"vangle\":%.2f,\"eyes\":[[%.2f,%.2f],[%.2f,%.2f]],")
 		TEXT("\"curves\":[[%.3f,%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f,%.3f]],\"shift\":[%.3f,%.1f],\"blink\":%.3f,\"mblink\":%.3f,\"bshown\":%.3f,\"head\":[%.1f,%.1f,%.1f],\"eyeerr\":[%.2f,%.2f],\"blinks\":[%d,%d,%d],\"shown\":{"),
 		MRLabTurnName(Turns.State), Live ? Live->VisitorLevel : 0.f, GazeKindName(Gaze.Kind), bTraceTracked ? 1 : 0, TraceVisitorDistance, TraceVisitorAngle,
