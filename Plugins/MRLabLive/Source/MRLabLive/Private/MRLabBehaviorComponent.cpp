@@ -276,6 +276,28 @@ bool UMRLabBehaviorComponent::LoadSettings()
 	{
 		Nods.Load(*Object);
 	}
+	if (Root->TryGetObjectField(TEXT("listening"), Object))
+	{
+		Listening.Load(*Object);
+		const TSharedPtr<FJsonObject>* Side = nullptr;
+		if ((*Object)->TryGetObjectField(TEXT("side_talk"), Side))
+		{
+			SideTalkBelow = NumberOr(*Side, TEXT("below"), SideTalkBelow);
+			SideTalkCount = int32(NumberOr(*Side, TEXT("count"), float(SideTalkCount)));
+			SideTalkAbove = NumberOr(*Side, TEXT("above"), SideTalkAbove);
+		}
+		const TSharedPtr<FJsonObject>* Laugh = nullptr;
+		if ((*Object)->TryGetObjectField(TEXT("laugh"), Laugh))
+		{
+			FString Name;
+			if ((*Laugh)->TryGetStringField(TEXT("category"), Name))
+			{
+				LaughCategory = FName(Name);
+			}
+			LaughValue = NumberOr(*Laugh, TEXT("value"), LaughValue);
+			LaughCooldown = NumberOr(*Laugh, TEXT("cooldown"), LaughCooldown);
+		}
+	}
 
 	bLoaded = true;
 	UE_LOG(LogMRLabBehavior, Log, TEXT("Behaviour: %d expression categories, %d baseline controls, strength %.2f, explicit moods %s (%s)"),
@@ -408,6 +430,32 @@ void UMRLabBehaviorComponent::HandleDecision(const FMRLabDecision& Decision)
 
 void UMRLabBehaviorComponent::HandleVisitor(const FMRLabDecision& Decision)
 {
+	// Side talk (9E): Decisions says twice in a row that the visitor is not talking to Frank; over when it says so again.
+	if (const FMRLabAnswer* ToFrank = Decision.Find(TEXT("to_frank")))
+	{
+		NotToFrank = ToFrank->Value < SideTalkBelow ? NotToFrank + 1 : 0;
+		const bool bWas = bSideTalk;
+		bSideTalk = NotToFrank >= SideTalkCount ? true : (ToFrank->Value > SideTalkAbove ? false : bSideTalk);
+		if (bSideTalk != bWas)
+		{
+			UE_LOG(LogMRLabBehavior, Log, TEXT("Side talk %s: \"%s\" to_frank %.2f"), bSideTalk ? TEXT("starts") : TEXT("ends"), *Decision.Text, ToFrank->Value);
+		}
+	}
+	// The visitor's laughter, as the voice model writes it in their transcript: a small smile back (9E).
+	const FString Lower = Decision.Text.ToLower();
+	const bool bLaugh = Lower.Contains(TEXT("[laugh")) || Lower.Contains(TEXT("laughs]")) || Lower.Contains(TEXT("(laugh"))
+		|| Lower.Contains(TEXT("[chuckl")) || Lower.Contains(TEXT("[giggl")) || Lower.Contains(TEXT("haha"));
+	const double LaughNow = FPlatformTime::Seconds();
+	if (bLaugh && !LaughCategory.IsNone() && LaughNow - LastLaughAt >= LaughCooldown)
+	{
+		if (FCategory* Smile = FindCategory(LaughCategory))
+		{
+			LastLaughAt = LaughNow;
+			++LaughCount;
+			Apply(*Smile, LaughValue);
+			UE_LOG(LogMRLabBehavior, Log, TEXT("The visitor laughs (\"%s\"): %s %.2f"), *Decision.Text, *LaughCategory.ToString(), LaughValue);
+		}
+	}
 	const FMRLabAnswer* Reaction = Decision.Find(TEXT("reaction"));
 	if (!Reaction || Reaction->Choice == TEXT("none"))
 	{
@@ -866,7 +914,28 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 	// chest and head; small nods on the stressed syllables of his own voice.
 	const FVector ToVisitor = Gaze.VisitorPoint(In) - In.FrankFeet;
 	const float VisitorYaw = FMath::FindDeltaAngleDegrees(In.FrankForward.Rotation().Yaw, ToVisitor.Rotation().Yaw);
-	Posture.Update(DeltaTime, Turns.State, VisitorYaw, FMath::Max(0.f, BaseValence - Valence));
+	if (Turns.State == EMRLabTurn::Outside)
+	{
+		bSideTalk = false;
+		NotToFrank = 0;
+	}
+	Posture.Update(DeltaTime, Turns.State, VisitorYaw, FMath::Max(0.f, BaseValence - Valence), bSideTalk);
+	// Listening nods (9E): cues only while the visitor speaks to Frank and his voice is not heard; none while he shows
+	// skepticism or annoyance; slower and smaller while he shows concern. A held listening sound gets one as it plays.
+	static const FName Skeptical(TEXT("skeptical")), Annoyed(TEXT("annoyed")), Concerned(TEXT("concerned"));
+	const auto ShownOf = [this](FName Name) { const FCategory* C = FindCategory(Name); return C ? C->Shown : 0.f; };
+	const bool bVeto = ShownOf(Skeptical) > 0.2f || ShownOf(Annoyed) > 0.2f;
+	const bool bConcerned = ShownOf(Concerned) > 0.2f;
+	const bool bCue = Turns.State == EMRLabTurn::Listening && !Turns.bFrankVoice && !bSideTalk && !bVeto;
+	const bool bNodOk = !Turns.bFrankVoice && !bSideTalk && Turns.State != EMRLabTurn::Outside;
+	static const TArray<FVector2f> NoFrames;
+	if (Live && Live->HeldSoundsPlayed() != LastHeldSounds)
+	{
+		LastHeldSounds = Live->HeldSoundsPlayed();
+		Listening.NodAt(Now + 0.12); // as the sound starts playing (after the lip sync delay)
+	}
+	Listening.Update(Now, Live ? Live->VisitorPitchFrames() : NoFrames, Turns.bVisitorVoice, bCue, bNodOk,
+		float(Now - Turns.VisitorTurnStart), bConcerned);
 	float Emphasis = 0.f;
 	if (Live)
 	{
@@ -882,7 +951,7 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 	}
 	const float ArousalUp = FMath::Clamp((Arousal - BaseArousal) / 0.5f, 0.f, 1.f);
 	Nods.Update(Now, DeltaTime, Live ? Live->VoiceLevelAhead(Nods.Lead, 0.04f) : 0.f, Turns.bFrankVoice, Emphasis, ArousalUp);
-	In.HeadPitchOffset = -(Nods.Pitch + Posture.Lower);
+	In.HeadPitchOffset = -(Nods.Pitch + Posture.Lower + Listening.Pitch);
 	Gaze.Update(In);
 
 	TraceModelBlink = Live ? FMath::Max(Live->LipSyncCurves.FindRef(BlinkCurveNames[0]), Live->LipSyncCurves.FindRef(BlinkCurveNames[1])) : 0.f;
@@ -1017,6 +1086,8 @@ void UMRLabBehaviorComponent::WriteTrace(float Speaking)
 	FString Line = FString::Printf(TEXT("{\"t\":%.3f,\"speaking\":%.3f,\"playhead\":%lld,\"waiting\":%.3f,\"held\":%.3f,\"valence\":%.3f,\"arousal\":%.3f,\"rapport\":%.3f,\"mood\":%d,"),
 		Now - TraceStart, Speaking, Live ? Live->VoicePlayhead() : 0LL, Live ? Live->VoiceWaiting() : 0.f, Live ? Live->VoiceHeld() : 0.f, Valence, Arousal, Rapport, CurrentMood);
 	Line += FString::Printf(TEXT("\"posture\":[%.2f,%.2f,%.2f],\"nod\":[%.2f,%d],"), Posture.ChestYaw, Posture.Lean, Posture.Lower, Nods.Pitch, Nods.Count);
+	Line += FString::Printf(TEXT("\"listen\":[%.2f,%d,%d,%.1f,%.1f],\"side\":%d,\"laughs\":%d,"), Listening.Pitch, Listening.Count, Listening.Cues,
+		Listening.LowHz, Listening.LastHz, bSideTalk ? 1 : 0, LaughCount);
 	Line += FString::Printf(TEXT("\"turn\":\"%s\",\"vlevel\":%.4f,\"gaze\":\"%s\",\"tracked\":%d,\"vdist\":%.0f,\"vangle\":%.2f,\"eyes\":[[%.2f,%.2f],[%.2f,%.2f]],")
 		TEXT("\"curves\":[[%.3f,%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f,%.3f]],\"shift\":[%.3f,%.1f],\"blink\":%.3f,\"mblink\":%.3f,\"bshown\":%.3f,\"head\":[%.1f,%.1f,%.1f],\"eyeerr\":[%.2f,%.2f],\"blinks\":[%d,%d,%d],\"shown\":{"),
 		MRLabTurnName(Turns.State), Live ? Live->VisitorLevel : 0.f, GazeKindName(Gaze.Kind), bTraceTracked ? 1 : 0, TraceVisitorDistance, TraceVisitorAngle,

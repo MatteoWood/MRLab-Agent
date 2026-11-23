@@ -142,5 +142,13 @@
     "_about": "Small nods while Frank speaks (Step 9D, D131): his voice is read lead seconds ahead of what is heard; a loudness peak at least peak times its running mean (over about mean_seconds) and min_level (RMS), at least min_gap seconds after the last nod, starts a nod: down in down seconds, back in up seconds, base degrees just above the threshold up to top for a peak twice the threshold, towards emphasis_top on words Decisions gives strength 3 (2: half way), times up to 1 + arousal_gain when the slow mood is excited. Head target degrees (the head turns about 70 % of them).",
     "lead": 0.1, "down": 0.12, "up": 0.18, "min_gap": 0.8, "peak": 1.5, "min_level": 0.02, "mean_seconds": 2.0,
     "base": 1.0, "top": 2.0, "emphasis_top": 3.0, "arousal_gain": 0.5
+  },
+  "listening": {
+    "_about": "Silent listening nods (Step 9E, D133), Ward's rule: while the visitor speaks to Frank (listening state, his voice not heard), at least min_speech seconds into their turn, a stretch of at least low_seconds of their voice below the low_share point of their own pitch (their last 30 s of voiced speech, counted once min_voiced seconds are in) gives a nod delay seconds later; nods at least min_gap seconds apart and at most per_minute in a minute; none while he shows skepticism or annoyance (0.2) or in side talk. A nod: degrees of head target pitch down in down seconds, back in up; a second one double_chance of the time, double_after later, double_size as big; while he shows concern concern_slow times slower and concern_size as big. A held listening sound (D128) gets a nod as it plays. side_talk: Decisions to_frank below 'below' on 'count' visitor fragments in a row, until it is above 'above' again: no nods, no lean-in. laugh: a laugh in the visitor's transcript ([laugh..], (laugh..), haha) shows 'category' at 'value', at most once in 'cooldown' seconds.",
+    "low_share": 0.26, "low_seconds": 0.11, "min_speech": 0.7, "delay": 0.7, "min_gap": 2.5, "per_minute": 10, "min_voiced": 2.0,
+    "degrees": 3.0, "down": 0.2, "up": 0.3, "double_chance": 0.33, "double_after": 0.5, "double_size": 0.7,
+    "concern_slow": 1.7, "concern_size": 0.7,
+    "side_talk": { "below": 0.35, "count": 3, "above": 0.5 },
+    "laugh": { "category": "amused", "value": 0.3, "cooldown": 10 }
   }
 }

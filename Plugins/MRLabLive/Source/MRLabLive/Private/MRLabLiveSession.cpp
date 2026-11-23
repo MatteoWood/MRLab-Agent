@@ -1210,6 +1210,83 @@ bool UMRLabLiveSession::WordEnds(const int16* Frame, int32 Num)
 	return CutQuietFrames >= WordEndQuietFrames;
 }
 
+void UMRLabLiveSession::AnalyseVisitor(const int16* Pcm, int32 Num)
+{
+	// 24 kHz to 8 kHz by averaging three samples (enough for a voice's pitch, 60 to 400 Hz).
+	for (int32 Index = 0; Index < Num; ++Index)
+	{
+		PitchCarry[PitchCarryCount++] = Pcm[Index] / 32768.f;
+		if (PitchCarryCount == 3)
+		{
+			PitchBuffer.Add((PitchCarry[0] + PitchCarry[1] + PitchCarry[2]) / 3.f);
+			PitchCarryCount = 0;
+		}
+	}
+	// YIN (de Cheveigne and Kawahara 2002) on 40 ms windows every 10 ms.
+	constexpr int32 Window = 320, Hop = 80, TauMin = 20, TauMax = 134, Span = Window - TauMax;
+	constexpr float Threshold = 0.15f, MinRms = 0.005f;
+	float Diff[TauMax + 1];
+	while (PitchRead + Window <= PitchBuffer.Num())
+	{
+		const float* X = PitchBuffer.GetData() + PitchRead;
+		double Energy = 0.0;
+		for (int32 J = Window - Hop; J < Window; ++J)
+		{
+			Energy += X[J] * X[J];
+		}
+		const float Rms = float(FMath::Sqrt(Energy / Hop));
+		float Hz = 0.f;
+		if (Rms >= MinRms)
+		{
+			Diff[0] = 1.f;
+			double Running = 0.0;
+			int32 Best = -1;
+			for (int32 Tau = 1; Tau <= TauMax; ++Tau)
+			{
+				double D = 0.0;
+				for (int32 J = 0; J < Span; ++J)
+				{
+					const float E = X[J] - X[J + Tau];
+					D += E * E;
+				}
+				Running += D;
+				Diff[Tau] = Running > 0.0 ? float(D * Tau / Running) : 1.f;
+			}
+			for (int32 Tau = TauMin; Tau <= TauMax; ++Tau)
+			{
+				if (Diff[Tau] < Threshold)
+				{
+					while (Tau + 1 <= TauMax && Diff[Tau + 1] < Diff[Tau])
+					{
+						++Tau;
+					}
+					Best = Tau;
+					break;
+				}
+			}
+			if (Best > 0)
+			{
+				// Parabolic interpolation around the minimum.
+				float Shift = 0.f;
+				if (Best > 1 && Best < TauMax)
+				{
+					const float A = Diff[Best - 1], B = Diff[Best], C = Diff[Best + 1];
+					const float Den = A - 2.f * B + C;
+					Shift = FMath::Abs(Den) > 1e-6f ? FMath::Clamp(0.5f * (A - C) / Den, -1.f, 1.f) : 0.f;
+				}
+				Hz = 8000.f / (Best + Shift);
+			}
+		}
+		PitchFrames.Emplace(Hz, Rms);
+		PitchRead += Hop;
+	}
+	if (PitchRead > 8000)
+	{
+		PitchBuffer.RemoveAt(0, PitchRead, EAllowShrinking::No);
+		PitchRead = 0;
+	}
+}
+
 void UMRLabLiveSession::HoldVoice(bool bHold)
 {
 	if (bHold == bVoiceHeld)
@@ -1245,6 +1322,17 @@ void UMRLabLiveSession::HoldVoice(bool bHold)
 	}
 	int32 Dropped = 0;
 	int32 DroppedSamples = 0;
+	// The first sound that will play is a short one (a listening sound): it gets a nod (9E).
+	for (int32 Index = 0; Index < Sounds.Num(); ++Index)
+	{
+		const bool bShort = Sounds[Index].Value - Sounds[Index].Key <= HeldShortSamples;
+		if (bShort && Index < LastShort)
+		{
+			continue; // left out below
+		}
+		HeldSounds += bShort ? 1 : 0;
+		break;
+	}
 	for (int32 Index = LastShort - 1; Index >= 0; --Index)
 	{
 		const int32 Start = Sounds[Index].Key;
@@ -1576,6 +1664,7 @@ void UMRLabLiveSession::StartReplay()
 	}
 	ReplayEvents.Reset();
 	ReplayLevels.Reset();
+	ReplayVisitorPcm.Reset();
 	for (const FString& Line : Lines)
 	{
 		TSharedPtr<FJsonObject> Entry;
@@ -1586,12 +1675,14 @@ void UMRLabLiveSession::StartReplay()
 		const TSharedPtr<FJsonObject> Message = Entry->GetObjectField(TEXT("m"));
 		if (Entry->GetStringField(TEXT("d")) != TEXT("in"))
 		{
-			// The visitor audio that was sent: only its loudness is replayed (VisitorLevel).
+			// The visitor audio that was sent: its loudness (VisitorLevel) and its pitch (9E) are replayed, not sent.
 			if (Message->GetStringField(TEXT("type")) == TEXT("session.input_audio.append"))
 			{
 				TArray<uint8> Bytes;
 				FBase64::Decode(Message->GetStringField(TEXT("audio")), Bytes);
-				ReplayLevels.Emplace(Entry->GetNumberField(TEXT("t")), PcmRms(reinterpret_cast<const int16*>(Bytes.GetData()), Bytes.Num() / 2));
+				const int16* Samples = reinterpret_cast<const int16*>(Bytes.GetData());
+				ReplayLevels.Emplace(Entry->GetNumberField(TEXT("t")), PcmRms(Samples, Bytes.Num() / 2));
+				ReplayVisitorPcm.Emplace(Samples, Bytes.Num() / 2);
 			}
 			continue;
 		}
@@ -1679,6 +1770,7 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	{
 		return;
 	}
+	PitchFrames.Reset();
 	if (bReplaying)
 	{
 		const double Elapsed = FPlatformTime::Seconds() - ReplayStart;
@@ -1688,6 +1780,8 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 		}
 		while (ReplayLevelNext < ReplayLevels.Num() && ReplayLevels[ReplayLevelNext].Key <= Elapsed)
 		{
+			const TArray<int16>& Visitor = ReplayVisitorPcm[ReplayLevelNext];
+			AnalyseVisitor(Visitor.GetData(), Visitor.Num());
 			VisitorLevel = ReplayLevels[ReplayLevelNext++].Value;
 		}
 		ReleaseVoice();
@@ -1730,6 +1824,7 @@ void UMRLabLiveSession::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	if (Pcm.Num() > 0)
 	{
 		VisitorLevel = PcmRms(Pcm.GetData(), Pcm.Num());
+		AnalyseVisitor(Pcm.GetData(), Pcm.Num());
 		TSharedRef<FJsonObject> Event = MakeShared<FJsonObject>();
 		Event->SetStringField(TEXT("type"), TEXT("session.input_audio.append"));
 		Event->SetStringField(TEXT("audio"), FBase64::Encode(reinterpret_cast<const uint8*>(Pcm.GetData()), Pcm.Num() * sizeof(int16)));
@@ -1749,7 +1844,12 @@ void UMRLabLiveSession::Shutdown(const FString& Reason)
 	bReplaying = false;
 	ReplayEvents.Reset();
 	ReplayLevels.Reset();
+	ReplayVisitorPcm.Reset();
 	VisitorLevel = 0.f;
+	PitchBuffer.Reset();
+	PitchRead = 0;
+	PitchCarryCount = 0;
+	PitchFrames.Reset();
 	PendingVoice.Reset();
 	DroppedSilence = 0;
 	LastAgentEndMs = -1;

@@ -49,7 +49,7 @@
           {
             "type": "predicate",
             "name": "to_frank",
-            "instructions": "The visitor is talking to Frank, not to a companion, on the phone, or to themselves."
+            "instructions": "The visitor is talking to Frank. False when they talk to someone else: they call another person by name (for example 'Anna, come here'), show something to a companion, invite or ask a companion something ('do you want to grab lunch after this?'), talk on the phone, or talk to themselves. Once they have turned to someone else, their words stay addressed to that person until they turn back to Frank (say his name, apologize to him, or ask him something about himself or the lab)."
           },
           {
             "type": "choice",

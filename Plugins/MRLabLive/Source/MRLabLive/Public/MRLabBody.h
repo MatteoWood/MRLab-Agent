@@ -22,7 +22,7 @@ struct FMRLabPosture
 	void Load(const TSharedPtr<FJsonObject>& Object);
 	/** VisitorYaw: the visitor's direction from his feet (degrees, + to his right as UE yaw); ValenceDrop: how far the
 	 * slow mood's valence is below the persona baseline (0 or more). */
-	void Update(float DeltaTime, EMRLabTurn State, float VisitorYaw, float ValenceDrop);
+	void Update(float DeltaTime, EMRLabTurn State, float VisitorYaw, float ValenceDrop, bool bSideTalk = false);
 
 	// Output (eased).
 	float ChestYaw = 0.f;  // degrees, UE yaw
@@ -33,6 +33,57 @@ private:
 	float YawA = 0.f, YawVA = 0.f, YawV = 0.f;
 	float LeanA = 0.f, LeanVA = 0.f, LeanV = 0.f;
 	float LowerA = 0.f, LowerVA = 0.f, LowerV = 0.f;
+};
+
+/** Silent listening nods (Step 9E, D133), by Ward's rule on the visitor's pitch: a stretch of their voice in the lowest
+ * quarter of their own pitch range, after enough of their turn, is answered by a nod a little later. */
+struct FMRLabListening
+{
+	// Settings ("listening" in Config/MRLabBehavior.json).
+	float LowShare = 0.26f;    // low pitch: below this share of the visitor's own voiced pitch (the last 30 s of it) ...
+	float LowSeconds = 0.11f;  // ... for at least this long (10 ms frames; a single unvoiced or higher frame is bridged)
+	float MinSpeech = 0.7f;    // only this long into their turn
+	float Delay = 0.7f;        // the nod comes this long after the cue
+	float MinGap = 2.5f;       // nods at least this far apart (start to start) ...
+	float PerMinute = 10.f;    // ... and at most this many in a minute
+	float MinVoiced = 2.f;     // seconds of their voiced speech before their pitch range counts
+	float Degrees = 3.f;       // head target degrees down (the head turns about 70 % of it)
+	float Down = 0.2f;         // seconds down, then
+	float Up = 0.3f;           // seconds back up
+	float DoubleChance = 0.33f; // a second nod, this often ...
+	float DoubleAfter = 0.5f;  // ... starting this long after the first ...
+	float DoubleSize = 0.7f;   // ... this much smaller
+	float ConcernSlow = 1.7f;  // while he shows concern: this many times slower ...
+	float ConcernSize = 0.7f;  // ... and this much smaller
+
+	void Load(const TSharedPtr<FJsonObject>& Object);
+	/** Frames: the visitor's pitch frames of this tick (Hz, 0 unvoiced; RMS). bVisitorVoice: they are speaking (their
+	 * frames count for their pitch range); bCue: a cue may start a nod (listening, his voice not heard, no veto);
+	 * bNod: a due nod may still happen (his voice not heard, no side talk); TurnAge: seconds into their turn. */
+	void Update(double Now, const TArray<FVector2f>& Frames, bool bVisitorVoice, bool bCue, bool bNod, float TurnAge, bool bConcerned);
+	/** A nod at this time (a held listening sound starts playing, D128). */
+	void NodAt(double At) { PendingAt = At; bPendingForced = true; }
+
+	// Output.
+	float Pitch = 0.f;   // head target degrees down now
+	int32 Count = 0;     // nods
+	int32 Cues = 0;      // cues found (also those that gave no nod)
+	float LowHz = 0.f;   // the visitor's low-pitch limit now
+	float LastHz = 0.f;  // their latest voiced pitch
+
+private:
+	struct FNod { double Start; float Size; float DownS; float UpS; };
+	void Start(double At, bool bConcerned);
+	TArray<float> Voiced;   // their recent voiced pitch (ring)
+	int32 VoicedNext = 0;
+	double LowAt = -1e9;    // when LowHz was last computed
+	int32 LowRun = 0;       // low frames in the current stretch
+	int32 Bridge = 0;       // frames bridged in it
+	bool bStretchUsed = false;
+	double PendingAt = -1.0;
+	bool bPendingForced = false;
+	TArray<double> Starts;  // nod starts (the last minute)
+	TArray<FNod> Active;
 };
 
 /** Small nods on the stressed syllables of his own voice: a loudness peak of the voice about to be heard starts a nod

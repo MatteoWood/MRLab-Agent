@@ -157,6 +157,11 @@ public:
 	void HoldVoice(bool bHold);
 	/** Loudness (RMS) of Frank's voice Seconds after the sample heard now, over Window seconds (0 where none waits). */
 	float VoiceLevelAhead(float Seconds, float Window) const;
+	/** Pitch of the visitor's voice (9E): one frame per 10 ms of their audio analysed in this component's latest tick
+	 * (x: Hz, 0 where unvoiced; y: loudness, RMS). The microphone or test input; in replays the recorded input. */
+	const TArray<FVector2f>& VisitorPitchFrames() const { return PitchFrames; }
+	/** Counts the held listening sounds that started playing (D128): each gets a nod (9E). */
+	int32 HeldSoundsPlayed() const { return HeldSounds; }
 	/** Seconds of Frank's voice waiting because of HoldVoice. */
 	float VoiceHeld() const { return bVoiceHeld ? PendingVoice.Num() / 24000.f : 0.f; }
 	/** Seconds until the end of his newest words is heard (their text runs ahead of his voice), -1 if unknown. */
@@ -322,7 +327,16 @@ private:
 	// Replay (ReplayFolder): received messages with their time since session start.
 	TArray<TPair<double, FString>> ReplayEvents;
 	TArray<TPair<double, float>> ReplayLevels; // recorded visitor audio: time, RMS
+	TArray<TArray<int16>> ReplayVisitorPcm;     // ... and the audio itself, for its pitch (9E)
 	int32 ReplayLevelNext = 0;
+	// Pitch of the visitor's voice (9E): their audio at 8 kHz, analysed every 10 ms over 40 ms (YIN).
+	void AnalyseVisitor(const int16* Pcm, int32 Num);
+	TArray<float> PitchBuffer;  // 8 kHz, from PitchRead on still to analyse
+	int32 PitchRead = 0;
+	float PitchCarry[3] = {};   // 24 kHz samples not yet averaged into one 8 kHz sample
+	int32 PitchCarryCount = 0;
+	TArray<FVector2f> PitchFrames;
+	int32 HeldSounds = 0;
 	int32 ReplayNext = 0;
 	double ReplayStart = 0.0;
 	bool bReplaying = false;
