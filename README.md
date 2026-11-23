@@ -612,6 +612,15 @@ Process:
 
 Newest first. One entry per work session: what was done, what was verified, what is left.
 
+### 2026-11-23 (Claude Code, laptop): MotionBricks raise-arm demo, GIF and video of Frank
+Done (owner's request, outside the roadmap steps):
+- Ran `MRLabMotion\tests\raise_arm2.py` again (4.13): same result as on 2026-11-17, bit for bit (raise 1.67 s, lower 1.67 s, 4.3 to 4.4 ms per generation with the editor closed, root 0.7 cm, feet 1.8 to 2.9 cm, hand 0.84 to 2.03 m). Stick figure `Saved/BehaviorTest/motionbricks_raise_arm2.gif` (`render_skeleton.py`).
+- Video of Frank doing it: `Saved/BehaviorTest/motionbricks_raise_arm2_frank.mp4` (not in Git), the retargeted clip `/Game/_Sandbox/Step9/Soma2/OnFrank/soma_clipsraise_Frank` (made from the same result on 2026-11-17) played on his level actor in the editor frame by frame (30 fps, 100 frames, 0.5 s holds), 3/4 front and side views. How: the body in single-node animation mode at a fixed time per frame, `HighResShot 2` of the level viewport with the camera rolled 90 deg (portrait, Frank about 1200 px tall; the editor viewport here is only 1440 x 548), one view at a time so the renderer's history is not reset by camera jumps, `ShowFlag.Volumes 0` to hide the post-process volume's outline; scripts in the session scratchpad, not in Git.
+- On Frank (editor, measured per frame): the arm swings forward, the hand passes in front of and above his forehead with the elbow bent (closest 30.6 cm from the head bone at 0.97 s), straightens up, and comes down forward (45 cm in front of the head at 2.67 s); it never touches him.
+Verified: the new result equals the 2026-11-17 file; all 200 captures written, each at its exact clip time with the pose settled; the video file read back (H.264, 1288 x 1080, 30 fps, 130 frames, 4.3 s) and frames from both views looked at; `reset_frank.py`: "Frank is at rest"; editor camera, `ShowFlag.Volumes` and background throttling restored; nothing unsaved.
+Not verified: the owner's look at the video; the motion in Play or in real time (single frames in the editor only, no Life node, so the feet slide as generated).
+Left: nothing for this request.
+
 ### 2026-11-22 (Claude Code, laptop): Step 9C, looking only once spoken to, no double blinks
 Done:
 - Owner's review of `gaze_conversation_v5.mp4`: Frank looks at the visitor only after the visitor starts the interaction by speaking; he stays on them until they are silent more than 5 s after he finishes talking, then goes back to his own business; when they speak again he looks at them again; always on the visitor while they speak; the rest is good; he sometimes blinks twice very fast (D124, D125).
