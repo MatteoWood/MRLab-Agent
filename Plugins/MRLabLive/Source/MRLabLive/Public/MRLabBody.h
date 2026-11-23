@@ -22,7 +22,7 @@ struct FMRLabPosture
 	void Load(const TSharedPtr<FJsonObject>& Object);
 	/** VisitorYaw: the visitor's direction from his feet (degrees, + to his right as UE yaw); ValenceDrop: how far the
 	 * slow mood's valence is below the persona baseline (0 or more). */
-	void Update(float DeltaTime, EMRLabTurn State, float VisitorYaw, float ValenceDrop, bool bSideTalk = false);
+	void Update(float DeltaTime, EMRLabTurn State, float VisitorYaw, float ValenceDrop);
 
 	// Output (eased).
 	float ChestYaw = 0.f;  // degrees, UE yaw
@@ -59,7 +59,7 @@ struct FMRLabListening
 	void Load(const TSharedPtr<FJsonObject>& Object);
 	/** Frames: the visitor's pitch frames of this tick (Hz, 0 unvoiced; RMS). bVisitorVoice: they are speaking (their
 	 * frames count for their pitch range); bCue: a cue may start a nod (listening, his voice not heard, no veto);
-	 * bNod: a due nod may still happen (his voice not heard, no side talk); TurnAge: seconds into their turn. */
+	 * bNod: a due nod may still happen (his voice not heard); TurnAge: seconds into their turn. */
 	void Update(double Now, const TArray<FVector2f>& Frames, bool bVisitorVoice, bool bCue, bool bNod, float TurnAge, bool bConcerned);
 	/** A nod at this time (a held listening sound starts playing, D128). */
 	void NodAt(double At) { PendingAt = At; bPendingForced = true; }

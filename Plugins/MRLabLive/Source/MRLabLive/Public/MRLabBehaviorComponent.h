@@ -172,14 +172,9 @@ private:
 	FMRLabBlinks Blinks;
 	FMRLabPosture Posture;
 	FMRLabNods Nods;
-	// Listening (9E, D133): silent nods by Ward's rule, side talk from Decisions to_frank, a smile back at laughter.
+	// Listening (9E, D133): silent nods by Ward's rule, a smile back at laughter. Side talk was removed (owner: TODO).
 	FMRLabListening Listening;
 	int32 LastHeldSounds = 0;
-	bool bSideTalk = false;
-	int32 NotToFrank = 0;      // visitor fragments in a row that Decisions says are not to Frank
-	float SideTalkBelow = 0.35f;
-	int32 SideTalkCount = 2;
-	float SideTalkAbove = 0.5f;
 	FName LaughCategory;       // shown when the visitor's transcript marks laughter ...
 	float LaughValue = 0.3f;
 	float LaughCooldown = 10.f; // ... at most once in this many seconds

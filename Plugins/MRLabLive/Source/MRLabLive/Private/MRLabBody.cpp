@@ -43,11 +43,10 @@ void FMRLabPosture::Load(const TSharedPtr<FJsonObject>& Object)
 	LowerMax = Num(Object, TEXT("lower_max"), LowerMax);
 }
 
-void FMRLabPosture::Update(float DeltaTime, EMRLabTurn State, float VisitorYaw, float ValenceDrop, bool bSideTalk)
+void FMRLabPosture::Update(float DeltaTime, EMRLabTurn State, float VisitorYaw, float ValenceDrop)
 {
 	const bool bConversation = State != EMRLabTurn::Outside && State != EMRLabTurn::Pause;
-	// No lean-in while the visitor talks to someone else (side talk, 9E).
-	const bool bListening = (State == EMRLabTurn::Listening || State == EMRLabTurn::VisitorYielding) && !bSideTalk;
+	const bool bListening = State == EMRLabTurn::Listening || State == EMRLabTurn::VisitorYielding;
 	const float YawGoal = bConversation ? FMath::Clamp(ChestShare * VisitorYaw, -ChestMax, ChestMax) : 0.f;
 	const float LeanGoal = bListening ? ListenLean : 0.f;
 	const float LowerGoal = FMath::Clamp(LowerPerValence * ValenceDrop, 0.f, LowerMax);
