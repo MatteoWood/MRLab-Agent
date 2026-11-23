@@ -268,6 +268,14 @@ bool UMRLabBehaviorComponent::LoadSettings()
 	{
 		Blinks.Load(*Object);
 	}
+	if (Root->TryGetObjectField(TEXT("posture"), Object))
+	{
+		Posture.Load(*Object);
+	}
+	if (Root->TryGetObjectField(TEXT("nods"), Object))
+	{
+		Nods.Load(*Object);
+	}
 
 	bLoaded = true;
 	UE_LOG(LogMRLabBehavior, Log, TEXT("Behaviour: %d expression categories, %d baseline controls, strength %.2f, explicit moods %s (%s)"),
@@ -316,6 +324,20 @@ void UMRLabBehaviorComponent::FindParts()
 				Slot = Mesh;
 				// Its animation updates after this component has written the eye, blink and head values.
 				Mesh->AddTickPrerequisiteComponent(this);
+			}
+			// The body gets its idle and the Life node only in Play: outside Play it keeps the A-pose (D130).
+			if (!bFace && !bBodyAnimSet && !Posture.BodyAnim.IsEmpty() && GetWorld() && GetWorld()->IsGameWorld())
+			{
+				bBodyAnimSet = true;
+				if (UClass* AnimClass = LoadClass<UAnimInstance>(nullptr, *Posture.BodyAnim))
+				{
+					Mesh->SetAnimInstanceClass(AnimClass);
+					UE_LOG(LogMRLabBehavior, Log, TEXT("Body: %s"), *AnimClass->GetPathName());
+				}
+				else
+				{
+					UE_LOG(LogMRLabBehavior, Warning, TEXT("Body: no AnimBP class %s; he stays in the A-pose"), *Posture.BodyAnim);
+				}
 			}
 		}
 	}
@@ -460,6 +482,16 @@ void UMRLabBehaviorComponent::HandleFrank(const FMRLabDecision& Decision)
 {
 	const FMRLabAnswer* Delivery = Decision.Find(TEXT("delivery"));
 	const FMRLabAnswer* Final = Decision.Find(TEXT("turn_final"));
+	// How strongly his words are delivered, for the nods when they are heard (9D).
+	if (const FMRLabAnswer* Emphasis = Decision.Find(TEXT("strength")); Emphasis && Decision.StartMs >= 0)
+	{
+		FrankStrengths.Emplace(Decision.StartMs, FMath::Clamp(Emphasis->Value / ScoreTop, 0.f, 1.f));
+		FrankStrengths.Sort([](const TPair<int32, float>& A, const TPair<int32, float>& B) { return A.Key < B.Key; });
+		if (FrankStrengths.Num() > 64)
+		{
+			FrankStrengths.RemoveAt(0, FrankStrengths.Num() - 64);
+		}
+	}
 	const bool bTurnFinal = Final && Final->Value >= 0.6f;
 	// The newest of his words (their text runs ahead of his voice; when he stops, these are the last ones heard).
 	// Decisions can arrive out of order: one on older words does not count.
@@ -828,6 +860,29 @@ void UMRLabBehaviorComponent::UpdateEyes(float DeltaTime, float Speaking)
 		}
 	}
 	In.Turns = &Turns;
+	FrankForward = In.FrankForward;
+
+	// Body (9D): the chest turns towards the visitor in a conversation and leans while he listens; a low mood lowers
+	// chest and head; small nods on the stressed syllables of his own voice.
+	const FVector ToVisitor = Gaze.VisitorPoint(In) - In.FrankFeet;
+	const float VisitorYaw = FMath::FindDeltaAngleDegrees(In.FrankForward.Rotation().Yaw, ToVisitor.Rotation().Yaw);
+	Posture.Update(DeltaTime, Turns.State, VisitorYaw, FMath::Max(0.f, BaseValence - Valence));
+	float Emphasis = 0.f;
+	if (Live)
+	{
+		const int64 Heard = Live->VoicePlayhead();
+		for (const TPair<int32, float>& Words : FrankStrengths)
+		{
+			const int64 Sample = Live->AgentFragmentSample(Words.Key);
+			if (Sample >= 0 && Sample <= Heard)
+			{
+				Emphasis = FMath::Clamp((Words.Value * ScoreTop - 1.f) / 2.f, 0.f, 1.f); // strength 1 none, 2 half, 3 full
+			}
+		}
+	}
+	const float ArousalUp = FMath::Clamp((Arousal - BaseArousal) / 0.5f, 0.f, 1.f);
+	Nods.Update(Now, DeltaTime, Live ? Live->VoiceLevelAhead(Nods.Lead, 0.04f) : 0.f, Turns.bFrankVoice, Emphasis, ArousalUp);
+	In.HeadPitchOffset = -(Nods.Pitch + Posture.Lower);
 	Gaze.Update(In);
 
 	TraceModelBlink = Live ? FMath::Max(Live->LipSyncCurves.FindRef(BlinkCurveNames[0]), Live->LipSyncCurves.FindRef(BlinkCurveNames[1])) : 0.f;
@@ -961,6 +1016,7 @@ void UMRLabBehaviorComponent::WriteTrace(float Speaking)
 	const UMRLabLiveSession* Live = Session.Get();
 	FString Line = FString::Printf(TEXT("{\"t\":%.3f,\"speaking\":%.3f,\"playhead\":%lld,\"waiting\":%.3f,\"held\":%.3f,\"valence\":%.3f,\"arousal\":%.3f,\"rapport\":%.3f,\"mood\":%d,"),
 		Now - TraceStart, Speaking, Live ? Live->VoicePlayhead() : 0LL, Live ? Live->VoiceWaiting() : 0.f, Live ? Live->VoiceHeld() : 0.f, Valence, Arousal, Rapport, CurrentMood);
+	Line += FString::Printf(TEXT("\"posture\":[%.2f,%.2f,%.2f],\"nod\":[%.2f,%d],"), Posture.ChestYaw, Posture.Lean, Posture.Lower, Nods.Pitch, Nods.Count);
 	Line += FString::Printf(TEXT("\"turn\":\"%s\",\"vlevel\":%.4f,\"gaze\":\"%s\",\"tracked\":%d,\"vdist\":%.0f,\"vangle\":%.2f,\"eyes\":[[%.2f,%.2f],[%.2f,%.2f]],")
 		TEXT("\"curves\":[[%.3f,%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f,%.3f]],\"shift\":[%.3f,%.1f],\"blink\":%.3f,\"mblink\":%.3f,\"bshown\":%.3f,\"head\":[%.1f,%.1f,%.1f],\"eyeerr\":[%.2f,%.2f],\"blinks\":[%d,%d,%d],\"shown\":{"),
 		MRLabTurnName(Turns.State), Live ? Live->VisitorLevel : 0.f, GazeKindName(Gaze.Kind), bTraceTracked ? 1 : 0, TraceVisitorDistance, TraceVisitorAngle,

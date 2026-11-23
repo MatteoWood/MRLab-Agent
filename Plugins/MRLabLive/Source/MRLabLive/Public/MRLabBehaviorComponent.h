@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "MRLabGaze.h"
+#include "MRLabBody.h"
 #include "MRLabBehaviorComponent.generated.h"
 
 class UMRLabLiveSession;
@@ -45,6 +46,14 @@ public:
 	const TArray<TPair<FName, float>>& GetFaceCurves() const { return FaceCurves; }
 	/** Face controls that replace the lip sync's: the eye look curves and the blinks (or held test controls). */
 	const TArray<TPair<FName, float>>& GetOverrideCurves() const { return OverrideCurves; }
+	/** Chest posture for the MRLab Life node (9D): yaw towards the visitor (UE degrees) and forward tilt (lean plus a low
+	 * mood, degrees), and the direction he faces at rest (world). Game thread. */
+	void GetPosture(float& OutYaw, float& OutTilt, FVector& OutForward) const
+	{
+		OutYaw = Posture.ChestYaw;
+		OutTilt = Posture.Lean + Posture.Lower;
+		OutForward = FrankForward;
+	}
 
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -161,6 +170,11 @@ private:
 	FMRLabTurns Turns;
 	FMRLabGaze Gaze;
 	FMRLabBlinks Blinks;
+	FMRLabPosture Posture;
+	FMRLabNods Nods;
+	FVector FrankForward = FVector::ForwardVector; // the direction his face points at rest (horizontal, world)
+	TArray<TPair<int32, float>> FrankStrengths;   // start_ms of his words and their Decisions strength (0..1), for the nods
+	bool bBodyAnimSet = false;
 	EMRLabTurn LoggedTurn = EMRLabTurn::Outside;
 	double TurnDoneAt = 0.0;  // latest visitor decision saying their turn is done or asks Frank
 	double TurnFinalAt = 0.0; // when the words Decisions marked as the end of Frank's turn were heard

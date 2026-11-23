@@ -71,6 +71,8 @@ public:
 	/** Samples waiting to be heard. */
 	int32 Waiting() const;
 	void CopyWaiting(TArray<int16>& Out) const;
+	/** RMS (0 to 1) of Count waiting samples from Offset on (0 where nothing waits). */
+	float WaitingRms(int32 Offset, int32 Count) const;
 	/** What waits from Offset on becomes silence; the Fade samples before Offset fade out. */
 	void SilenceFrom(int32 Offset, int32 Fade);
 	/** Samples of silence played because nothing was waiting, since the previous call. */
@@ -153,6 +155,8 @@ public:
 	/** The visitor speaks (owner, D126): while held, Frank's voice that has not started yet waits instead of playing;
 	 * released, it plays, with the stream's silence in it dropped (the model waited for the visitor). */
 	void HoldVoice(bool bHold);
+	/** Loudness (RMS) of Frank's voice Seconds after the sample heard now, over Window seconds (0 where none waits). */
+	float VoiceLevelAhead(float Seconds, float Window) const;
 	/** Seconds of Frank's voice waiting because of HoldVoice. */
 	float VoiceHeld() const { return bVoiceHeld ? PendingVoice.Num() / 24000.f : 0.f; }
 	/** Seconds until the end of his newest words is heard (their text runs ahead of his voice), -1 if unknown. */

@@ -77,6 +77,7 @@ struct FMRLabGazeInput
 	FVector EyeR = FVector::ZeroVector;
 	bool bTracked = false;
 	FVector Visitor = FVector::ZeroVector;       // tracked head point, world (valid when tracked)
+	float HeadPitchOffset = 0.f;                 // degrees added to the head target's pitch after its easing (+ up): nods, a low mood (9D)
 	const FMRLabTurns* Turns = nullptr;
 };
 
@@ -138,6 +139,8 @@ struct FMRLabGaze
 	}
 	/** On the visitor until this time, whatever the state (no aversions). */
 	void HoldVisitor(double HoldUntil) { HoldVisitorUntil = FMath::Max(HoldVisitorUntil, HoldUntil); }
+	/** The visitor's head: tracked, or the fallback point in front. */
+	FVector VisitorPoint(const FMRLabGazeInput& In) const;
 
 	// Output.
 	float Curves[2][4] = {};         // per eye: look right, left, up, down
@@ -151,7 +154,6 @@ struct FMRLabGaze
 
 private:
 	FVector Local(const FMRLabGazeInput& In, const FVector& Point) const; // (forward, left, up) -> world
-	FVector VisitorPoint(const FMRLabGazeInput& In) const;
 	FVector Offset(const FMRLabGazeInput& In, const FVector& Around, float Yaw, float Pitch) const;
 	void LookAt(const FMRLabGazeInput& In, EKind NewKind, const FVector& Point, bool bTrackVisitor, double Until);
 	void StartSaccade(const FMRLabGazeInput& In, const FVector& To);

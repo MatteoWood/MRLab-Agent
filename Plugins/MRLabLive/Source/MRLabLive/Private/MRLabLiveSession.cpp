@@ -58,6 +58,23 @@ namespace
 	constexpr float VoiceRms = 0.003f;
 	constexpr float MouthOpenPerStep = 0.35f;
 	constexpr float MouthClosePerStep = 0.1f;
+	// Held while the visitor speaks (D126): of several short sounds ("mm", "oh") only the last plays (owner, D128). A
+	// sound is voice (10 ms frames above this RMS) with gaps shorter than HeldGapSamples; short means at most
+	// HeldShortSamples long. Longer pieces (the start of an answer) always play.
+	constexpr float HeldVoiceRms = 0.01f;
+	constexpr int32 HeldGapSamples = LiveSampleRate * 3 / 10;
+	constexpr int32 HeldShortSamples = LiveSampleRate;
+
+	float PcmRms(const int16* Pcm, int32 Num)
+	{
+		double Sum = 0.0;
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			const double Value = Pcm[Index] / 32768.0;
+			Sum += Value * Value;
+		}
+		return Num > 0 ? float(FMath::Sqrt(Sum / Num)) : 0.f;
+	}
 
 	// Frank stays silent while the visitor speaks (owner, D126): no listening sounds over them, and he yields when they
 	// talk over him. Policy headings and the backchannel wording from OpenAI's GPT-Live prompting guide for gpt-live-1.1
@@ -1200,9 +1217,56 @@ void UMRLabLiveSession::HoldVoice(bool bHold)
 		return;
 	}
 	bVoiceHeld = bHold;
-	if (!bHold && PendingVoice.Num() >= LiveSampleRate / 10)
+	if (bHold || PendingVoice.Num() == 0)
 	{
-		UE_LOG(LogMRLabLive, Log, TEXT("Voice held while the visitor spoke: %.2f s, plays now"), PendingVoice.Num() / float(LiveSampleRate));
+		return;
+	}
+	// Several short sounds held while the visitor spoke ("mm", "oh"): only the last one plays (owner, D128).
+	TArray<TPair<int32, int32>> Sounds; // [start, end) in PendingVoice
+	for (int32 Frame = 0; Frame + SilenceFrame <= PendingVoice.Num(); Frame += SilenceFrame)
+	{
+		if (PcmRms(PendingVoice.GetData() + Frame, SilenceFrame) < HeldVoiceRms)
+		{
+			continue;
+		}
+		if (Sounds.Num() > 0 && Frame - Sounds.Last().Value < HeldGapSamples)
+		{
+			Sounds.Last().Value = Frame + SilenceFrame;
+		}
+		else
+		{
+			Sounds.Emplace(Frame, Frame + SilenceFrame);
+		}
+	}
+	int32 LastShort = INDEX_NONE;
+	for (int32 Index = 0; Index < Sounds.Num(); ++Index)
+	{
+		LastShort = Sounds[Index].Value - Sounds[Index].Key <= HeldShortSamples ? Index : LastShort;
+	}
+	int32 Dropped = 0;
+	int32 DroppedSamples = 0;
+	for (int32 Index = LastShort - 1; Index >= 0; --Index)
+	{
+		const int32 Start = Sounds[Index].Key;
+		const int32 Count = Sounds[Index].Value - Start;
+		if (Count > HeldShortSamples)
+		{
+			continue;
+		}
+		PendingVoice.RemoveAt(Start, Count);
+		// The voice clock of his current utterance (AgentFragmentSample) moves with what is taken out before it.
+		const int64 AnchorIndex = AgentAnchorSample - VoiceQueued;
+		if (AgentAnchorSample >= 0 && AnchorIndex >= Start)
+		{
+			AgentAnchorSample = AnchorIndex >= Start + Count ? AgentAnchorSample - Count : VoiceQueued + Start;
+		}
+		++Dropped;
+		DroppedSamples += Count;
+	}
+	if (PendingVoice.Num() >= LiveSampleRate / 10)
+	{
+		UE_LOG(LogMRLabLive, Log, TEXT("Voice held while the visitor spoke: %.2f s, plays now (%d sounds; %d earlier short ones left out, %.2f s)"),
+			PendingVoice.Num() / float(LiveSampleRate), Sounds.Num() - Dropped, Dropped, DroppedSamples / float(LiveSampleRate));
 	}
 }
 
@@ -1259,6 +1323,19 @@ void UMRLabVoiceWave::CopyWaiting(TArray<int16>& Out) const
 {
 	FScopeLock ScopeLock(&Lock);
 	Out = TArray<int16>(Buffer.GetData() + Read, Buffer.Num() - Read);
+}
+
+float UMRLabVoiceWave::WaitingRms(int32 Offset, int32 Count) const
+{
+	FScopeLock ScopeLock(&Lock);
+	const int32 Start = Read + FMath::Max(0, Offset);
+	const int32 End = FMath::Min(Start + FMath::Max(0, Count), Buffer.Num());
+	return End > Start ? PcmRms(Buffer.GetData() + Start, End - Start) : 0.f;
+}
+
+float UMRLabLiveSession::VoiceLevelAhead(float Seconds, float Window) const
+{
+	return VoiceWave ? VoiceWave->WaitingRms(int32(Seconds * LiveSampleRate), int32(Window * LiveSampleRate)) : 0.f;
 }
 
 void UMRLabVoiceWave::SilenceFrom(int32 Offset, int32 Fade)
@@ -1487,19 +1564,6 @@ void UMRLabLiveSession::StartMicrophone()
 	UE_LOG(LogMRLabLive, Log, TEXT("Microphone open: %d Hz, %d channels"), MicRate, MicChannels);
 }
 
-namespace
-{
-	float PcmRms(const int16* Pcm, int32 Num)
-	{
-		double Sum = 0.0;
-		for (int32 Index = 0; Index < Num; ++Index)
-		{
-			const double Value = Pcm[Index] / 32768.0;
-			Sum += Value * Value;
-		}
-		return Num > 0 ? float(FMath::Sqrt(Sum / Num)) : 0.f;
-	}
-}
 
 void UMRLabLiveSession::StartReplay()
 {

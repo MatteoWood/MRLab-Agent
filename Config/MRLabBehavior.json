@@ -132,5 +132,15 @@
     "close_seconds": 0.07, "open_seconds": 0.18, "long_closed": [0.4, 0.6],
     "shift_degrees": 25, "shift_probability": 0.5, "understood_probability": 0.3, "understood_min_turn": 2.0,
     "min_gap": 1.0, "wait_for_pause": 0.5, "arousal_gain": 0.3
+  },
+  "posture": {
+    "_about": "Frank's body in Play (README 4.15, Step 9D, D131): body_anim is put on the body when Play starts (outside Play he keeps the A-pose, D130). In a conversation (not outside, not in a pause) the chest turns chest_share of the visitor's direction, at most chest_max degrees; while the visitor speaks and while he thinks it leans listen_lean degrees forward; valence below the persona baseline lowers chest and head by lower_per_valence degrees per unit, at most lower_max. All on the spine (MRLab Life node), eased: 95 % after seconds.",
+    "body_anim": "/Game/MetaHumans/Agent/ABP_Agent_Body.ABP_Agent_Body_C",
+    "chest_share": 0.25, "chest_max": 12, "listen_lean": 2, "seconds": 2.0, "lower_per_valence": 4, "lower_max": 2
+  },
+  "nods": {
+    "_about": "Small nods while Frank speaks (Step 9D, D131): his voice is read lead seconds ahead of what is heard; a loudness peak at least peak times its running mean (over about mean_seconds) and min_level (RMS), at least min_gap seconds after the last nod, starts a nod: down in down seconds, back in up seconds, base degrees just above the threshold up to top for a peak twice the threshold, towards emphasis_top on words Decisions gives strength 3 (2: half way), times up to 1 + arousal_gain when the slow mood is excited. Head target degrees (the head turns about 70 % of them).",
+    "lead": 0.1, "down": 0.12, "up": 0.18, "min_gap": 0.8, "peak": 1.5, "min_level": 0.02, "mean_seconds": 2.0,
+    "base": 1.0, "top": 2.0, "emphasis_top": 3.0, "arousal_gain": 0.5
   }
 }
